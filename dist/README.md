@@ -9,7 +9,7 @@ scheduled sync.
 ## Why this is committed
 
 A composite GitHub Action runs from the ref a consumer pins
-(`uses: OffConstruct/notiongit-sync@425b414ad8080ce2d309dfcac52c94f4557e21bd`,
+(`uses: OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448`,
 i.e. v2.0.0), not from a package registry — there is no
 install step that could pull in dependencies for it. Committing the bundle is
 what makes the action self-contained at that ref.

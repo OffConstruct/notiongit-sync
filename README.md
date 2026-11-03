@@ -2,7 +2,7 @@
 
 The Notion → Jekyll sync engine behind [InkDrafts](https://github.com/OffConstruct) —
 packaged to be consumed by generated sites as a reusable GitHub Action
-(`uses: OffConstruct/notiongit-sync@425b414ad8080ce2d309dfcac52c94f4557e21bd`,
+(`uses: OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448`,
 pinned to the v2.0.0 commit). The engine reads two Notion databases and
 writes the Jekyll files a GitHub Pages site needs. Nothing else: no telemetry, no
 network calls beyond the Notion API, no site content of its own.
@@ -217,7 +217,7 @@ run summary (above) — a non-zero exit never means the outputs are empty.
 ## Usage as a GitHub Action
 
 ```yaml
-- uses: OffConstruct/notiongit-sync@425b414ad8080ce2d309dfcac52c94f4557e21bd # v2.0.0
+- uses: OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448 # v2.0.1
   id: sync
   with:
     notion_token: ${{ secrets.NOTION_TOKEN }}
@@ -240,7 +240,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: OffConstruct/notiongit-sync@425b414ad8080ce2d309dfcac52c94f4557e21bd # v2.0.0
+      - uses: OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448 # v2.0.1
         id: sync
         with:
           notion_token: ${{ secrets.NOTION_TOKEN }}
@@ -349,7 +349,7 @@ future dependency changes.
 ## Releasing
 
 Generated sites consume `uses: OffConstruct/notiongit-sync`, pinned to an immutable
-full commit SHA (`OffConstruct/notiongit-sync@425b414ad8080ce2d309dfcac52c94f4557e21bd`, `# v2.0.0`),
+full commit SHA (`OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448`, `# v2.0.1`),
 so a site's version moves only when the template bumps its pin. The `vX` major
 aliases still move on every release; consumers who prefer automatic updates can
 pin an alias instead, at their own risk, while full `vX.Y.Z` tags remain
