@@ -21,8 +21,15 @@ const read = (...segments) => readFileSync(path.join(REPO_ROOT, ...segments), 'u
  */
 const BUNDLE_HOST_ALLOWLIST = new Set(['api.notion.com', 'developers.notion.com', 'github.com']);
 
-/** The one endpoint the engine actually contacts. */
+/** The one API endpoint the engine contacts (through @notionhq/client). */
 const NOTION_API_HOST = 'api.notion.com';
+
+/**
+ * Hosts Notion serves uploaded files from. The engine's one fetch call
+ * downloads from these and nothing else, without credentials — see
+ * "Notion-hosted files" in SECURITY.md.
+ */
+const NOTION_FILE_HOSTS = ['prod-files-secure.s3.us-west-2.amazonaws.com', 's3.us-west-2.amazonaws.com', 'file.notion.so'];
 
 /** Modules the engine source may require — the client, plus stdlib file/path. */
 const ENGINE_REQUIRE_ALLOWLIST = new Set(['@notionhq/client', 'fs', 'path']);
@@ -76,8 +83,12 @@ describe('network contract: dist bundle', () => {
   });
 
   it('never mentions InkDrafts, telemetry, or analytics', () => {
+    // One exception: the web address of the example post the InkDrafts Notion
+    // template ships, which the bulk-delete guard lets the owner remove. It
+    // is compared against local files only, never sent anywhere.
+    const text = bundle.toLowerCase().replaceAll("'welcome-to-inkdrafts'", '').replaceAll('"welcome-to-inkdrafts"', '');
     for (const needle of ['inkdrafts', 'analytics', 'telemetry']) {
-      expect(bundle.toLowerCase().includes(needle)).toBe(false);
+      expect(text.includes(needle)).toBe(false);
     }
   });
 });
@@ -95,10 +106,27 @@ describe('network contract: engine source', () => {
       expect(source).not.toContain(`require('${module}')`);
       expect(source).not.toContain(`require("${module}")`);
     }
-    // The only outbound requests flow through @notionhq/client; the engine
-    // itself must not call fetch (fetchPublished/fetchAllBlocks are plain
-    // names over the client — this regex matches a bare `fetch(` call only).
-    expect(source).not.toMatch(/\bfetch\s*\(/);
+    // API requests flow through @notionhq/client. The engine itself calls
+    // fetch exactly once, in downloadFile(), for Notion-hosted files
+    // (fetchPublished/fetchAllBlocks are plain names over the client — this
+    // regex matches a bare `fetch(` call only).
+    const calls = [...source.matchAll(/(?<![\w.])fetch\s*\(/g)];
+    expect(calls.length).toBe(1);
+    const downloadFn = source.slice(source.indexOf('async function downloadFile('));
+    expect(downloadFn.slice(0, downloadFn.indexOf('\n}\n'))).toMatch(/(?<![\w.])fetch\s*\(/);
+  });
+
+  it('downloads files only from the Notion file hosts, without sending credentials', () => {
+    const declared = source.match(/const NOTION_FILE_HOSTS = \[([^\]]*)\]/)?.[1] ?? '';
+    expect([...declared.matchAll(/'([^']+)'/g)].map((m) => m[1])).toEqual(NOTION_FILE_HOSTS);
+    // The whole download function, not just the first call parenthesis: an
+    // option added after the timeout signal must not slip past.
+    const downloadFn = source.slice(source.indexOf('async function downloadFile('));
+    const body = downloadFn.slice(0, downloadFn.indexOf('\n}\n'));
+    expect(body).toMatch(/(?<![\w.])fetch\s*\(url\b/);
+    expect(body).not.toMatch(/headers\s*:|Authorization|auth\w*\s*:|token|credentials/i);
+    // Every download is gated by the host check, before and after redirects.
+    expect(source.match(/isAllowedFileUrl\(/g)?.length).toBeGreaterThanOrEqual(3);
   });
 
   it('references the Notion API host as its only real endpoint', () => {
@@ -168,7 +196,7 @@ describe('network contract: SECURITY.md stays in sync', () => {
   const doc = read('SECURITY.md');
 
   it('documents every allowlisted endpoint and action', () => {
-    for (const host of [NOTION_API_HOST, 'bun.sh']) {
+    for (const host of [NOTION_API_HOST, 'bun.sh', ...NOTION_FILE_HOSTS]) {
       expect(doc.includes(host)).toBe(true);
     }
     for (const uses of [

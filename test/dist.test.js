@@ -152,12 +152,10 @@ describe('dist/index.js (committed Action bundle)', () => {
     expect(summary).toMatchObject({ schema_version: 1, result: 'success', code: 'synced', changed: true });
   });
 
-  it('reports code=bulk_delete_guard (not sync_error) when bundled — proves the GuardError instanceof check survives minification', async () => {
-    // GuardError is distinguished from a generic sync error purely by
-    // `instanceof` (scripts/sync-notion.js's main()). A bundler that renamed
-    // or duplicated the class across module scopes would break that check
-    // silently in the bundle without failing any source-run test — this is
-    // exactly the class of bug test/dist.test.js exists to catch.
+  it('reports code=bulk_delete_guard (not sync_error) when bundled, and keeps the tracked file', async () => {
+    // The guard is reported from structured section results, not from an
+    // exception; this proves the bundle keeps that path (and the exit code
+    // the workflow relies on) intact after minification.
     const guardSite = mkdtempSync(path.join(tmpdir(), 'notiongit-dist-guard-site-'));
     tempDirs.push(guardSite);
 
@@ -187,7 +185,7 @@ describe('dist/index.js (committed Action bundle)', () => {
 
     const { stderr, exitCode } = await runDist({ ...guardEnv, GITHUB_OUTPUT: guardOutFile });
     expect(exitCode).toBe(1);
-    expect(stderr).toContain('bulk-delete guard');
+    expect(stderr).toContain('HELD BACK');
     expect(existsSync(path.join(guardSite, '_pages', 'guarded.md'))).toBe(true); // untouched
 
     const outputLines = readFileSync(guardOutFile, 'utf8').split('\n');

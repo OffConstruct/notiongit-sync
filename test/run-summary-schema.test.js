@@ -119,6 +119,53 @@ describe('run summary conforms to schema/run-summary.v1.json', () => {
     expect(summary.result).toBe('failure');
   });
 
+  it('row_errors and guard runs name the rows in `affected`, never in `detail`, capped at 20', () => {
+    const failed = Array.from({ length: 25 }, (_, i) => ({ section: 'posts', title: `  Post\n${i}  `, reason_code: 'read_failed' }));
+    const summary = engine.buildRunSummary({
+      result: 'failure', code: 'bulk_delete_guard', changed: true,
+      startedAt: '2026-09-02T12:00:00.000Z', finishedAt: '2026-09-02T12:00:02.000Z',
+      sections: [
+        { label: 'pages', stats: zeroStats(), failed: [], skipped: [], guard: { label: 'pages', titles: ['About'] } },
+        { label: 'posts', stats: { ...zeroStats(), errors: 25 }, failed, skipped: [
+          { section: 'posts', title: 'Big', reason_code: 'file_too_large', count: 2 },
+        ] },
+      ],
+      detail: 'bulk-delete guard tripped for pages: would delete 1 of 1 tracked (100%)',
+      secrets: [],
+    });
+    assertConformsToSchema(summary);
+    expect(summary.affected.length).toBe(20);
+    expect(summary.affected[0]).toEqual({ section: 'pages', title: 'About', reason_code: 'would_remove', reason: expect.any(String) });
+    expect(summary.affected[1]).toEqual({ section: 'posts', title: 'Post 0', reason_code: 'read_failed', reason: expect.any(String) });
+    expect(summary.skipped).toEqual([{ section: 'posts', title: 'Big', reason_code: 'file_too_large', reason: expect.stringContaining('20 MB'), count: 2 }]);
+    expect(summary.detail).not.toContain('About');
+
+    const md = engine.renderStepSummaryMarkdown(summary);
+    expect(md).toContain('Kept on the site, waiting for you to confirm');
+    expect(md).toContain('Published, with something left out');
+  });
+
+  it('leaves `affected` and `skipped` out entirely when there is nothing to name', () => {
+    const summary = engine.buildRunSummary({
+      result: 'success', code: 'synced', changed: false,
+      startedAt: '2026-09-02T12:00:00.000Z', finishedAt: '2026-09-02T12:00:01.000Z',
+      sections: [{ label: 'posts', stats: zeroStats(), failed: [], skipped: [], guard: null }],
+      detail: 'posts: 0 created', secrets: [],
+    });
+    expect('affected' in summary).toBe(false);
+    expect('skipped' in summary).toBe(false);
+  });
+
+  it('the Markdown rendering escapes Markdown in titles', () => {
+    const summary = engine.buildRunSummary({
+      result: 'failure', code: 'row_errors', changed: false,
+      startedAt: '2026-09-02T12:00:00.000Z', finishedAt: '2026-09-02T12:00:01.000Z',
+      sections: [{ label: 'posts', stats: { ...zeroStats(), errors: 1 }, failed: [{ section: 'posts', title: '[x](javascript:1) | *b*', reason_code: 'unexpected' }], skipped: [] }],
+      detail: '', secrets: [],
+    });
+    expect(engine.renderStepSummaryMarkdown(summary)).toContain('\\[x\\](javascript:1) \\| \\*b\\*');
+  });
+
   it('success — posts-only configuration leaves pages null but data_files a real (non-null) value', () => {
     // Not an abort: a posts-only site legitimately never runs the pages
     // section, so `pages` is null while `posts` and `data_files` are real —

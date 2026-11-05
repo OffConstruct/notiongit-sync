@@ -166,7 +166,7 @@ describe('blockToMarkdown', () => {
     expect(engine.blockToMarkdown({ type: 'divider', divider: {} })).toBe('---');
   });
 
-  it('image prefers the external url and falls back to file url', () => {
+  it('image links an external url as-is, and a Notion-hosted file only through its local copy', () => {
     expect(engine.blockToMarkdown({
       type: 'image',
       image: { type: 'external', external: { url: 'https://example.com/a.png' }, caption: rt('alt text') },
@@ -174,8 +174,30 @@ describe('blockToMarkdown', () => {
 
     expect(engine.blockToMarkdown({
       type: 'image',
-      image: { type: 'file', file: { url: 'https://files.example.com/b.png' } },
-    })).toBe('![](https://files.example.com/b.png)');
+      _local_url: '/assets/notion/abc-b.png',
+      image: { type: 'file', file: { url: 'https://prod-files-secure.s3.us-west-2.amazonaws.com/w/f/b.png?X-Amz-Expires=3600' } },
+    })).toBe('![](/assets/notion/abc-b.png)');
+
+    // Never the signed URL: it expires within the hour and changes on every read.
+    expect(engine.blockToMarkdown({
+      type: 'image',
+      image: { type: 'file', file: { url: 'https://prod-files-secure.s3.us-west-2.amazonaws.com/w/f/b.png?X-Amz-Expires=3600' } },
+    })).toBeNull();
+  });
+
+  it.each(['file', 'pdf', 'audio'])('%s renders a download link to its copy, named by caption or file name', (type) => {
+    expect(engine.blockToMarkdown({
+      type, _local_url: '/assets/notion/x-menu.pdf',
+      [type]: { type: 'file', file: { url: 'https://file.notion.so/f/menu.pdf' }, name: 'menu.pdf', caption: [] },
+    })).toBe('[menu.pdf](/assets/notion/x-menu.pdf)');
+    expect(engine.blockToMarkdown({
+      type, [type]: { type: 'external', external: { url: 'https://example.com/a.pdf' }, caption: rt('Our menu') },
+    })).toBe('[Our menu](https://example.com/a.pdf)');
+  });
+
+  it('embed renders as a link', () => {
+    expect(engine.blockToMarkdown({ type: 'embed', embed: { url: 'https://maps.example.com/x' } }))
+      .toBe('[https://maps.example.com/x](https://maps.example.com/x)');
   });
 
   it('video renders a play-arrow link, with or without a caption', () => {
@@ -195,9 +217,44 @@ describe('blockToMarkdown', () => {
       .toBe('[https://example.com](https://example.com)');
   });
 
-  it('toggle renders a collapsed <details> with an empty body (children not fetched)', () => {
+  it('toggle renders a collapsed <details> that kramdown fills with the toggle body', () => {
     expect(engine.blockToMarkdown({ type: 'toggle', toggle: { rich_text: rt('More') } }))
-      .toBe('<details>\n<summary>More</summary>\n\n</details>');
+      .toBe('<details markdown="1">\n<summary>More</summary>\n\n</details>');
+    expect(engine.blockToMarkdown({
+      type: 'toggle',
+      toggle: { rich_text: rt('Q: <why>?') },
+      children: [{ type: 'paragraph', paragraph: { rich_text: rt('Because.') } }],
+    })).toBe('<details markdown="1">\n<summary>Q: &lt;why&gt;?</summary>\n\nBecause.\n\n</details>');
+  });
+
+  it('nests child list items under their parent, indented to its content column', () => {
+    const child = { type: 'bulleted_list_item', bulleted_list_item: { rich_text: rt('child') } };
+    expect(engine.blockToMarkdown({ type: 'bulleted_list_item', bulleted_list_item: { rich_text: rt('parent') }, children: [child] }))
+      .toBe('- parent\n  - child');
+    expect(engine.blockToMarkdown({ type: 'numbered_list_item', numbered_list_item: { rich_text: rt('one') }, children: [child] }))
+      .toBe('1. one\n   - child');
+  });
+
+  it('keeps a quote\'s nested blocks inside the quote', () => {
+    expect(engine.blockToMarkdown({
+      type: 'quote', quote: { rich_text: rt('said') },
+      children: [{ type: 'paragraph', paragraph: { rich_text: rt('more') } }],
+    })).toBe('> said\n>\n> more');
+  });
+
+  it('flattens columns into one column of content, in reading order', () => {
+    const col = (text) => ({ type: 'column', column: {}, children: [{ type: 'paragraph', paragraph: { rich_text: rt(text) } }] });
+    expect(engine.blockToMarkdown({ type: 'column_list', column_list: {}, children: [col('left'), col('right')] }))
+      .toBe('left\n\nright');
+  });
+
+  it('renders a table as a GFM table, with a header rule only when Notion marks a header row', () => {
+    const row = (...cells) => ({ type: 'table_row', table_row: { cells: cells.map((c) => rt(c)) } });
+    expect(engine.blockToMarkdown({
+      type: 'table', table: { has_column_header: true }, children: [row('Day', 'Time'), row('Mon', '9|10')],
+    })).toBe('| Day | Time |\n| --- | --- |\n| Mon | 9\\|10 |');
+    expect(engine.blockToMarkdown({ type: 'table', table: { has_column_header: false }, children: [row('a', 'b')] }))
+      .toBe('| a | b |');
   });
 });
 
@@ -298,6 +355,11 @@ describe('titleToSlug', () => {
     ['--Leading and trailing dashes--', 'leading-and-trailing-dashes'],
     ['UPPERCASE TITLE', 'uppercase-title'],
     ['Under_scores_stay', 'under_scores_stay'],
+    ['Mi viaje: día 1', 'mi-viaje-dia-1'],
+    ['Crème brûlée & Smørrebrød', 'creme-brulee-smorrebrod'],
+    ['a/b/c', 'a-b-c'],
+    ['_Leading underscore', 'leading-underscore'],
+    ['東京の夏', ''],
     ['Numbers 123 Stay', 'numbers-123-stay'],
     ["Apostrophe's and \"quotes\"", 'apostrophes-and-quotes'],
     ['Collapses -- multiple -- dashes', 'collapses-multiple-dashes'],
@@ -314,6 +376,9 @@ describe('typeToLayout', () => {
     ['blog', 'blog'],
     ['home', 'home'],
     ['markdown', 'page'],
+    ['Home page', 'home'],
+    ['List of posts', 'blog'],
+    ['Regular page', 'page'],
     ['anything-unrecognized', 'page'],
     [undefined, 'page'],
   ])('typeToLayout(%j) → %j', (type, expected) => {
@@ -330,7 +395,7 @@ describe('buildPageFrontMatter', () => {
       '---\n' +
       'layout: page\n' +
       'title: "About"\n' +
-      'slug: about\n' +
+      'slug: "about"\n' +
       'notion_id: "notion-id-123"\n' +
       '---'
     );
@@ -342,7 +407,7 @@ describe('buildPageFrontMatter', () => {
     expect(fm).toContain('description: "A short blurb"');
     // Placed between slug and notion_id.
     expect(fm.split('\n').indexOf('description: "A short blurb"'))
-      .toBe(fm.split('\n').indexOf('slug: about') + 1);
+      .toBe(fm.split('\n').indexOf('slug: "about"') + 1);
   });
 
   it('JSON-escapes quotes inside the title', () => {
@@ -371,7 +436,7 @@ describe('buildPostFrontMatter', () => {
       'layout: post\n' +
       'title: "Hello World"\n' +
       'date: 2026-01-15\n' +
-      'slug: hello-world\n' +
+      'slug: "hello-world"\n' +
       'notion_id: "id"\n' +
       '---'
     );
@@ -408,5 +473,112 @@ describe('buildPostFrontMatter', () => {
 describe('postFilename', () => {
   it('joins date and slug with a Jekyll-style dated filename', () => {
     expect(engine.postFilename('2026-01-15', 'hello-world')).toBe('2026-01-15-hello-world.md');
+  });
+
+  it('uses only the calendar day of a date that carries a time', () => {
+    expect(engine.postFilename('2026-01-15T09:30:00.000+09:00', 'hello')).toBe('2026-01-15-hello.md');
+  });
+});
+
+// ─── Titles, web addresses, dates (row metadata) ────────────────────────────────
+
+describe('row metadata', () => {
+  const title = (...parts) => ({ type: 'title', title: parts.map((plain_text) => ({ plain_text })) });
+  const text  = (plain_text) => ({ type: 'rich_text', rich_text: [{ plain_text }] });
+  const pageRow = (properties, extra = {}) => ({ id: 'abcdef12-0000-4000-8000-000000000000', properties, ...extra });
+
+  it('keeps a title with formatting whole, not just its first part', () => {
+    const meta = engine.extractPostMeta(pageRow({ Title: title('My ', 'great', ' trip') }));
+    expect(meta.title).toBe('My great trip');
+    expect(meta.slug).toBe('my-great-trip');
+  });
+
+  it('finds the title column by its type, whatever it is called', () => {
+    expect(engine.extractPageMeta(pageRow({ Headline: title('Contact') })).title).toBe('Contact');
+  });
+
+  it('reads the v2 column names: Web address, Menu order, Show in menu, friendly Type labels', () => {
+    const meta = engine.extractPageMeta(pageRow({
+      Title: title('About me'),
+      Type: { type: 'select', select: { name: 'Regular page' } },
+      'Web address': text('about'),
+      'Menu order': { type: 'number', number: 10 },
+      'Show in menu': { type: 'checkbox', checkbox: true },
+      Summary: text('Who I am'),
+    }));
+    expect(meta).toMatchObject({ slug: 'about', type: 'markdown', navOrder: 10, showInNav: true, description: 'Who I am' });
+    expect(engine.extractPageMeta(pageRow({ Title: title('Home'), Type: { select: { name: 'Home page' } } })).type).toBe('home');
+  });
+
+  it('reads the v2 post names: Date, Cover image, Originally published at', () => {
+    const meta = engine.extractPostMeta(pageRow({
+      Title: title('Trip'),
+      Date: { type: 'date', date: { start: '2026-03-01' } },
+      'Cover image': { type: 'files', files: [{ type: 'external', external: { url: 'https://example.com/c.jpg' } }] },
+      'Originally published at': { type: 'url', url: 'https://example.com/original' },
+    }));
+    expect(meta).toMatchObject({ date: '2026-03-01', coverImage: 'https://example.com/c.jpg', canonicalUrl: 'https://example.com/original' });
+  });
+
+  it('joins every part of the name, tagline and summary too', () => {
+    const meta = engine.extractPageMeta(pageRow({
+      Title: title('Home'),
+      Name: { rich_text: [{ plain_text: 'Ana ' }, { plain_text: 'Silva' }] },
+      Tagline: { rich_text: [{ plain_text: 'Potter, ' }, { plain_text: 'teacher' }] },
+    }));
+    expect(meta.displayName).toBe('Ana Silva');
+    expect(meta.tagline).toBe('Potter, teacher');
+  });
+
+  it('a post without a date uses the day it was created, so its address does not move daily', () => {
+    const meta = engine.extractPostMeta(pageRow({ Title: title('Undated') }, { created_time: '2026-02-03T10:00:00.000Z' }));
+    expect(meta.date).toBe('2026-02-03');
+  });
+});
+
+describe('resolveSlug (stable web addresses)', () => {
+  const id = 'abcdef12-0000-4000-8000-000000000000';
+
+  it('keeps a typed address that is already safe exactly as typed', () => {
+    expect(engine.resolveSlug({ typed: 'My_Page', title: 'x', existingSlug: '', pageId: id })).toBe('My_Page');
+  });
+
+  it('cleans a typed address that would break a URL or a filename', () => {
+    expect(engine.resolveSlug({ typed: 'Mi viaje: día 1', title: 'x', existingSlug: '', pageId: id })).toBe('mi-viaje-dia-1');
+    expect(engine.resolveSlug({ typed: 'travel/day-1', title: 'x', existingSlug: '', pageId: id })).toBe('travel-day-1');
+  });
+
+  it('keeps the address the row already has when only its title changed', () => {
+    expect(engine.resolveSlug({ typed: '', title: 'My trip (fixed typo)', existingSlug: 'my-tirp', pageId: id })).toBe('my-tirp');
+  });
+
+  it('falls back to the row id when the title has no Latin letters', () => {
+    expect(engine.resolveSlug({ typed: '', title: '東京の夏', existingSlug: '', pageId: id })).toBe('page-abcdef12');
+  });
+});
+
+describe('isFutureDate (scheduled posts)', () => {
+  const now = new Date('2026-05-10T12:00:00Z');
+
+  it('compares a plain date as a calendar day', () => {
+    expect(engine.isFutureDate('2026-05-10', now)).toBe(false);
+    expect(engine.isFutureDate('2026-05-11', now)).toBe(true);
+    expect(engine.isFutureDate('2026-05-09', now)).toBe(false);
+  });
+
+  it('compares a date with a time as an instant', () => {
+    expect(engine.isFutureDate('2026-05-10T14:00:00.000+00:00', now)).toBe(true);
+    expect(engine.isFutureDate('2026-05-10T09:00:00.000+00:00', now)).toBe(false);
+  });
+});
+
+describe('protectLiquid', () => {
+  it('leaves ordinary text byte-for-byte alone', () => {
+    expect(engine.protectLiquid('Just words.')).toBe('Just words.');
+  });
+
+  it('wraps text that Liquid would eat or choke on', () => {
+    expect(engine.protectLiquid('Use {{ name }} here')).toBe('{% raw %}\nUse {{ name }} here\n{% endraw %}');
+    expect(engine.protectLiquid('{% endraw %} inside')).not.toMatch(/^\{% raw %\}\n\{% endraw %\} inside/);
   });
 });

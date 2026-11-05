@@ -7,10 +7,10 @@ Every claim here is enforced or reviewable in source
 one); the maintainers' checklist at the bottom is what keeps it true when
 dependencies change.
 
-**The contract in one sentence:** the sync engine contacts exactly one
-endpoint — the Notion API, read-only — and writes only the Jekyll files
-listed below into your own checkout; it has no telemetry and never contacts
-InkDrafts.
+**The contract in one sentence:** the sync engine reads from the Notion API
+(read-only) and downloads the files you uploaded to Notion from Notion's own
+file hosts, and writes only the Jekyll files listed below into your own
+checkout; it has no telemetry and never contacts InkDrafts.
 
 ## Outbound network destinations
 
@@ -19,6 +19,7 @@ The complete list. Anything not here is a contract violation and a bug.
 | Destination | Who contacts it | When | What is sent |
 |---|---|---|---|
 | `https://api.notion.com/v1/` | The sync engine (the bundled `@notionhq/client`) | Every run | `NOTION_TOKEN` (as the `Authorization: Bearer` header), the database/page IDs from your inputs, and the `Notion-Version` header. Two read-only calls per synced row set: `POST /v1/databases/{id}/query` (filtered to `Status = Published`) and `GET /v1/blocks/{id}/children` (page bodies). Nothing is ever written to Notion. |
+| Notion's file hosts: `prod-files-secure.s3.us-west-2.amazonaws.com`, `s3.us-west-2.amazonaws.com`, `file.notion.so` | The sync engine (one `fetch` call, `downloadFile()` in [`scripts/sync-notion.js`](scripts/sync-notion.js)) | When a published row holds a file uploaded to Notion (a photo, video, PDF, cover image or profile photo) that the site has no copy of yet | A plain `GET` of the signed URL Notion returned for that file. No token, no cookies, no headers of yours: the signature in the URL is the only credential, and Notion issued it for this one read. |
 | `bun.sh` (release archive) and GitHub (`oven-sh/bun` tags/releases) | The `oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6` (v2.2.0) setup step | Once per run, before the sync | Nothing of yours — it downloads the Bun runtime itself and resolves which version to fetch. Your token, database IDs, and content are not involved. |
 | Your repository's own git remote | Your workflow's `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1` (v7.0.1) and commit/push steps | Before and after the sync | Your synced content — this is the standard GitHub Actions flow in **your** repository, not this Action's code. |
 
@@ -27,20 +28,34 @@ That is all. Specifically:
 - **No telemetry, no analytics, no error reporting.** The engine never
   contacts `inkdrafts.*` or any InkDrafts-owned endpoint. InkDrafts receives
   nothing from a sync run.
-- **Images, videos, bookmarks and cover URLs are never fetched by the
-  Action.** URLs taken from your Notion content are copied verbatim into the
-  generated Markdown. They are only fetched later — by Jekyll at site build
-  or by a reader's browser — which happens outside this Action.
+- **Notion-hosted files.** Notion links uploaded files through signed URLs
+  that expire after an hour, so the engine copies each one into
+  `assets/notion/` and links the copy. The download is refused unless:
+  - the URL is `https` on one of the three Notion file hosts above, both
+    before and after any redirect;
+  - the file name ends in an extension on the engine's list (common photo,
+    video, audio and document types; no HTML, SVG or scripts);
+  - the response's `Content-Type` matches that kind of file (or is a generic
+    binary type);
+  - the file is at most 20 MB.
+  A refused file is left out of the page and named in the run summary
+  (`skipped`). Each copy is named after the URL without its signature, so a
+  file is downloaded once and never re-fetched while it stays in the page.
+- **External links are never fetched by the Action.** Images, videos,
+  bookmarks, embeds and cover URLs you paste as links are copied verbatim
+  into the generated Markdown. They are only fetched later — by Jekyll at
+  site build or by a reader's browser — which happens outside this Action.
 - **No package installation at run time.** The engine ships as a committed
   bundle (`dist/index.js`), so a consumer run never runs `bun install` and
   never contacts an npm registry. (The bundle references `node-fetch` because
   `@notionhq/client` uses it; Bun satisfies that with its built-in
   implementation over the native `fetch` — the package is not bundled and not
   downloaded.)
-- `NOTION_BASE_URL` can redirect the engine's one endpoint, but it exists for
-  the local test harness (which serves a fake Notion API on `localhost`) and
-  is never set by `action.yml`. If you find it set in a workflow, that
-  workflow is exfiltrating your token.
+- `NOTION_BASE_URL` can redirect the engine's API endpoint (and lets file
+  downloads come from that same origin), but it exists for the local test
+  harness (which serves a fake Notion API on `localhost`) and is never set by
+  `action.yml`. If you find it set in a workflow, that workflow is
+  exfiltrating your token.
 
 ## What runs, and as whom
 
@@ -78,14 +93,17 @@ All writes land inside `SITE_ROOT` (your checkout):
 | `_posts/{date}-{slug}.md` | One per published post row |
 | `_data/nav.yml` | Nav labels/URLs of rows with *Show in Nav* |
 | `_data/home.yml` | The home row's name, tagline, profile picture URL, social links, bio |
-| `_config.yml` | Only the `title:` and `author.name:` lines are rewritten, line by line |
+| `_config.yml` | Only the `title:`, `description:` and `author.name:` lines are rewritten, line by line |
+| `assets/notion/{hash}-{name}.{ext}` | Copies of files uploaded to Notion that a generated page links to. Copies no generated page links to any more are deleted. |
 | `$GITHUB_OUTPUT`, `$GITHUB_STEP_SUMMARY` | Runner-managed; appended `changed`/`summary` outputs and the Markdown run summary |
 
 Deletions are limited to generated files whose `notion_id` front-matter keys
-no longer appear among published rows, and the bulk-delete guard aborts
-before deleting when a run returns zero published rows or would delete more
-than `MAX_DELETE_RATIO` (default 0.5) of a directory's tracked files unless
-`ALLOW_BULK_DELETE=true`. Nothing outside these paths is created, modified,
+no longer appear among published rows, and to `assets/notion/` copies no
+generated file links to. The bulk-delete guard holds the deletions back
+when a run returns zero published rows, or would delete more than two files
+and more than `MAX_DELETE_RATIO` (default 0.5) of a directory's tracked
+files, unless `ALLOW_BULK_DELETE=true`. Removing only the template's example
+post is always allowed. Nothing outside these paths is created, modified,
 or removed.
 
 ## Logging and redaction
@@ -100,8 +118,13 @@ or removed.
   [`scripts/sync-notion.js`](scripts/sync-notion.js)) that replaces the token
   and both database IDs with `[redacted]` before the summary is written; a
   test ([`test/run-summary-schema.test.js`](test/run-summary-schema.test.js))
-  covers this. Run summaries contain counts and outcome codes only — never
+  covers this. The `detail` line holds counts and outcome codes only — never
   page titles, filenames, or IDs.
+- **Titles in the run summary.** The optional `affected` and `skipped`
+  lists name rows by title so the site owner can find them: rows that could
+  not be published, rows whose removal is waiting for confirmation, and rows
+  published with something left out. They are titles of rows that are, or
+  were, Published — public on the site already. Draft rows are never read.
 - **Present in plain step logs:** page/post titles and slugs (per-row
   progress lines), filenames, and the database IDs (`Database: …` lines).
   For a public repository, Actions logs are readable by anyone. This is the
@@ -122,7 +145,7 @@ or removed.
 
 The contract is enforced by [`test/network-contract.test.js`](test/network-contract.test.js),
 which fails CI when any of the following drifts. Results of the most recent
-audit (issue #9):
+audit (issue #9, updated for the file downloads in 2.1.0):
 
 - `dist/index.js` contains exactly four URL-literal hosts:
   `api.notion.com` (the endpoint) and
@@ -134,12 +157,16 @@ audit (issue #9):
   `// node_modules/...` provenance comments). Its only network primitive is
   the client's request to its configured prefix URL (`https://api.notion.com/v1/`).
 - The engine source imports `fs` and `path` (plus the client) and nothing
-  network-facing; it makes no `fetch` calls of its own.
+  network-facing. It makes exactly one `fetch` call of its own, in
+  `downloadFile()`, which sends no headers and runs only after the host
+  check against the three Notion file hosts.
 - `action.yml` references exactly one third-party action:
   `oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6` (v2.2.0, pinned
   to the full commit SHA).
 - No InkDrafts, telemetry, or analytics reference exists in the engine or the
-  bundle.
+  bundle, apart from the web address of the InkDrafts template's example post
+  (`welcome-to-inkdrafts`), which the bulk-delete guard compares against
+  local files so the owner can remove that post.
 
 Re-check the endpoint claim by hand at any time:
 

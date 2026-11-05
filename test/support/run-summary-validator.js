@@ -6,7 +6,8 @@
  * schema/run-summary.v1.json.
  *
  * Only implements the keywords this repo's own schema uses ($ref, oneOf,
- * const, enum, type, format: date-time, required, additionalProperties).
+ * const, enum, type, format: date-time, minLength/maxLength, required,
+ * additionalProperties, items, maxItems).
  * Not a general-purpose validator — just enough to prove the schema file and
  * buildRunSummary's actual output agree, without adding a dependency.
  */
@@ -45,6 +46,8 @@ function validateAgainstSchema(node, value, defs) {
       return true;
     case 'string':
       if (typeof value !== 'string') throw new Error(`expected string, got ${JSON.stringify(value)}`);
+      if (node.minLength !== undefined && value.length < node.minLength) throw new Error(`string shorter than ${node.minLength}`);
+      if (node.maxLength !== undefined && value.length > node.maxLength) throw new Error(`string longer than ${node.maxLength}`);
       if (node.format === 'date-time' && Number.isNaN(Date.parse(value))) {
         throw new Error(`expected a parseable date-time, got ${JSON.stringify(value)}`);
       }
@@ -55,6 +58,11 @@ function validateAgainstSchema(node, value, defs) {
     case 'integer':
       if (!Number.isInteger(value)) throw new Error(`expected integer, got ${JSON.stringify(value)}`);
       if (node.minimum !== undefined && value < node.minimum) throw new Error(`${value} below minimum ${node.minimum}`);
+      return true;
+    case 'array':
+      if (!Array.isArray(value)) throw new Error(`expected array, got ${JSON.stringify(value)}`);
+      if (node.maxItems !== undefined && value.length > node.maxItems) throw new Error(`more than ${node.maxItems} items`);
+      for (const item of value) validateAgainstSchema(node.items, item, defs);
       return true;
     case 'object': {
       if (typeof value !== 'object' || value === null || Array.isArray(value)) {

@@ -12,6 +12,66 @@ workflow refuses to tag a version with no matching section here.
 
 ## [Unreleased]
 
+Planned as 2.1.0. Additive within run summary `schema_version` 1; generated
+files change once on upgrade (slugs are now quoted in front matter).
+
+### Added
+
+- Files uploaded to Notion (photos, videos, PDFs, audio and documents in the
+  page body, the post `Cover Image`, the home `Profile Picture`) are copied
+  into `assets/notion/` and linked from there, instead of linking Notion's
+  signed URLs, which expire after an hour and changed on every run. Copies
+  are named after the URL without its signature, so each file is fetched
+  once; unlinked copies are deleted. Downloads are limited to Notion's file
+  hosts, known file types and 20 MB (see SECURITY.md). `Profile Picture`
+  accepts Files & media as well as text.
+- Nested blocks are read three levels deep: toggles publish their contents,
+  nested lists nest, columns are flattened, tables render as GFM tables,
+  synced blocks render their content, embeds render as links, and file / PDF
+  / audio blocks as download links.
+- Column aliases for the v2 InkDrafts template: `Web address` (Slug),
+  `Menu order` (Nav Order), `Show in menu` (Show in Nav), `Cover image` /
+  `Cover` (Cover Image), `Originally published at` (Canonical URL), and the
+  `Type` labels `Home page`, `List of posts` and `Regular page`. The title is
+  found by its Notion type, whatever the column is called.
+- The home row's `Tagline` (or `Summary`) is written to `_config.yml` as
+  `description`.
+- Posts dated in the future are held back until their date
+  (`posts.scheduled` in the run summary) and are never deleted meanwhile.
+- Run summary: optional `affected` (rows not published, or whose removal is
+  held back, by title and `reason_code`), optional `skipped` (rows published
+  with a file or block left out), and optional `scheduled` /
+  `skipped_blocks` section counts.
+- Text that looks like Liquid is wrapped in `{% raw %}`, so it can't break
+  the Jekyll build.
+
+### Changed
+
+- The bulk-delete guard works per section and holds deletions back instead
+  of aborting the run: the other section, and the held-back section's other
+  changes, still go through (`changed` reports them; the engine still exits
+  1). Removing only the template's example post, or up to two rows while
+  Notion still returns published rows, is always allowed.
+- A run where some rows fail (`row_errors`) now exits 0 with a
+  `::warning::`, so the rest of the site keeps updating.
+- Web addresses: a typed slug that would break a URL or filename is cleaned
+  up (`Mi viaje: día 1` → `mi-viaje-dia-1`), accents are transliterated
+  instead of dropped, a row keeps its existing address when only its title
+  changes, a title with no Latin letters falls back to `page-` plus the row
+  id, and slugs are written quoted. Two rows with the same address no longer
+  overwrite each other: the second is reported (`duplicate_web_address`).
+- A post with no date uses the day it was created, not the day of the run.
+  A date with a time no longer leaks the time into the filename.
+- Titles and text properties read every rich-text part, so formatting in a
+  title no longer cuts it off.
+- Notion rate limits (429) are retried.
+- CI and release builds pin Bun 1.4.4 (was 1.4.0); `dist/` is rebuilt with it.
+
+### Consumer workflow
+
+- Commit with `if: ${{ !cancelled() && steps.sync.outputs.changed == 'true' }}`
+  and add `assets/notion` to the paths you commit (see the README example).
+
 ## [2.0.1] - 2026-09-05
 
 ### Fixed

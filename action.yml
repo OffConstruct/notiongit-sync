@@ -10,7 +10,8 @@
 #
 # The engine runs with Bun against the consumer's checkout ($GITHUB_WORKSPACE),
 # not this action's own copy under _actions/ — SITE_ROOT below points its
-# writes (_pages/, _posts/, _data/, _config.yml) at the workspace.
+# writes (_pages/, _posts/, _data/, _config.yml, assets/notion/) at the
+# workspace.
 #
 # The sync step below runs the committed dist/index.js bundle, not
 # scripts/sync-notion.js directly, so consumer workflows never run
@@ -19,8 +20,9 @@
 name: 'Notion → Jekyll Sync'
 description: >-
   Syncs published pages and posts from two Notion databases into a Jekyll site
-  checkout: _pages/, _posts/, _data/nav.yml, _data/home.yml, and the title /
-  author.name lines of _config.yml. Aborts on suspicious bulk deletes.
+  checkout: _pages/, _posts/, _data/nav.yml, _data/home.yml, the title /
+  description / author.name lines of _config.yml, and copies of files
+  uploaded to Notion under assets/notion/. Holds back suspicious bulk deletes.
 
 inputs:
   notion_token:
@@ -41,9 +43,9 @@ inputs:
   allow_bulk_delete:
     description: >-
       true to allow a sync that deletes every tracked file. By default the run
-      aborts when Notion returns zero published rows or a deletion exceeds
-      MAX_DELETE_RATIO (environment variable, default 0.5). "true" in any case
-      spelling is accepted.
+      holds deletions back (and exits 1) when Notion returns zero published
+      rows, or more than two deletions exceed MAX_DELETE_RATIO (environment
+      variable, default 0.5). "true" in any case spelling is accepted.
     required: false
     default: 'false'
 
@@ -51,10 +53,11 @@ outputs:
   changed:
     description: >-
       "true" when any tracked file was created, updated, renamed or deleted
-      this run — including _data/nav.yml, _data/home.yml and the managed lines
-      of _config.yml. Independent of success/failure: a run that fails partway
-      through (some rows errored) can still report "true" for the files it
-      did write before failing. "false" when nothing was ever written. Every
+      this run — including _data/nav.yml, _data/home.yml, the managed lines
+      of _config.yml and assets/notion/. Independent of success/failure: a run
+      where some rows errored, or whose deletions were held back, reports
+      "true" for the files it did write, and those should be committed.
+      "false" when nothing was written, and always after a sync_error. Every
       terminal outcome emits this output.
     value: ${{ steps.sync.outputs.changed }}
   summary:

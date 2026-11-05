@@ -28,11 +28,11 @@ var require_logging = __commonJS(function(exports) {
   exports.logLevelSeverity = exports.makeConsoleLogger = exports.LogLevel = undefined;
   var utils_1 = require_utils();
   var LogLevel;
-  (function(LogLevel2) {
-    LogLevel2["DEBUG"] = "debug";
-    LogLevel2["INFO"] = "info";
-    LogLevel2["WARN"] = "warn";
-    LogLevel2["ERROR"] = "error";
+  (function(LogLevel) {
+    LogLevel["DEBUG"] = "debug";
+    LogLevel["INFO"] = "info";
+    LogLevel["WARN"] = "warn";
+    LogLevel["ERROR"] = "error";
   })(LogLevel = exports.LogLevel || (exports.LogLevel = {}));
   function makeConsoleLogger(name) {
     return (level, message, extraInfo) => {
@@ -63,23 +63,23 @@ var require_errors = __commonJS(function(exports) {
   exports.buildRequestError = exports.APIResponseError = exports.UnknownHTTPResponseError = exports.isHTTPResponseError = exports.RequestTimeoutError = exports.isNotionClientError = exports.ClientErrorCode = exports.APIErrorCode = undefined;
   var utils_1 = require_utils();
   var APIErrorCode;
-  (function(APIErrorCode2) {
-    APIErrorCode2["Unauthorized"] = "unauthorized";
-    APIErrorCode2["RestrictedResource"] = "restricted_resource";
-    APIErrorCode2["ObjectNotFound"] = "object_not_found";
-    APIErrorCode2["RateLimited"] = "rate_limited";
-    APIErrorCode2["InvalidJSON"] = "invalid_json";
-    APIErrorCode2["InvalidRequestURL"] = "invalid_request_url";
-    APIErrorCode2["InvalidRequest"] = "invalid_request";
-    APIErrorCode2["ValidationError"] = "validation_error";
-    APIErrorCode2["ConflictError"] = "conflict_error";
-    APIErrorCode2["InternalServerError"] = "internal_server_error";
-    APIErrorCode2["ServiceUnavailable"] = "service_unavailable";
+  (function(APIErrorCode) {
+    APIErrorCode["Unauthorized"] = "unauthorized";
+    APIErrorCode["RestrictedResource"] = "restricted_resource";
+    APIErrorCode["ObjectNotFound"] = "object_not_found";
+    APIErrorCode["RateLimited"] = "rate_limited";
+    APIErrorCode["InvalidJSON"] = "invalid_json";
+    APIErrorCode["InvalidRequestURL"] = "invalid_request_url";
+    APIErrorCode["InvalidRequest"] = "invalid_request";
+    APIErrorCode["ValidationError"] = "validation_error";
+    APIErrorCode["ConflictError"] = "conflict_error";
+    APIErrorCode["InternalServerError"] = "internal_server_error";
+    APIErrorCode["ServiceUnavailable"] = "service_unavailable";
   })(APIErrorCode = exports.APIErrorCode || (exports.APIErrorCode = {}));
   var ClientErrorCode;
-  (function(ClientErrorCode2) {
-    ClientErrorCode2["RequestTimeout"] = "notionhq_client_request_timeout";
-    ClientErrorCode2["ResponseError"] = "notionhq_client_response_error";
+  (function(ClientErrorCode) {
+    ClientErrorCode["RequestTimeout"] = "notionhq_client_request_timeout";
+    ClientErrorCode["ResponseError"] = "notionhq_client_response_error";
   })(ClientErrorCode = exports.ClientErrorCode || (exports.ClientErrorCode = {}));
 
   class NotionClientErrorBase extends Error {
@@ -1016,16 +1016,6 @@ var require_sync_notion = __commonJS(function(exports, module) {
 
   class ConfigError extends Error {
   }
-
-  class GuardError extends Error {
-    constructor(message, { label, staleCount, trackedCount, ratio }) {
-      super(message);
-      this.label = label;
-      this.staleCount = staleCount;
-      this.trackedCount = trackedCount;
-      this.ratio = ratio;
-    }
-  }
   function isTrue(value) {
     return String(value ?? "").trim().toLowerCase() === "true";
   }
@@ -1058,6 +1048,9 @@ var require_sync_notion = __commonJS(function(exports, module) {
   var POSTS_DIR;
   var PAGES_DIR;
   var DATA_DIR;
+  var ASSETS_DIR;
+  var ASSET_URL_PREFIX;
+  var TEST_FILE_HOST;
   function initRun(config) {
     PAGES_DB_ID = config.pagesDbId;
     POSTS_DB_ID = config.postsDbId;
@@ -1071,6 +1064,18 @@ var require_sync_notion = __commonJS(function(exports, module) {
     POSTS_DIR = path.join(ROOT_DIR, "_posts");
     PAGES_DIR = path.join(ROOT_DIR, "_pages");
     DATA_DIR = path.join(ROOT_DIR, "_data");
+    ASSETS_DIR = path.join(ROOT_DIR, ...ASSETS_SUBDIR.split("/"));
+    ASSET_URL_PREFIX = `${readConfigBaseurl()}/${ASSETS_SUBDIR}/`;
+    TEST_FILE_HOST = config.notionBaseUrl ? new URL(config.notionBaseUrl).host : null;
+  }
+  function readConfigBaseurl() {
+    try {
+      const config = fs.readFileSync(path.join(ROOT_DIR, "_config.yml"), "utf8");
+      const match = config.match(/^baseurl:[ \t]*["']?([^"'#\n]*?)["']?[ \t]*(#.*)?$/m);
+      return (match?.[1] ?? "").trim().replace(/\/+$/, "");
+    } catch {
+      return "";
+    }
   }
   function richTextToMarkdown(richText = []) {
     return richText.map((item) => {
@@ -1094,26 +1099,84 @@ var require_sync_notion = __commonJS(function(exports, module) {
       return text;
     }).join("");
   }
+  function richTextToPlain(richText = []) {
+    return (richText ?? []).map((item) => item?.plain_text ?? "").join("");
+  }
+  function escapeHtml(text) {
+    return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function indent(text, spaces) {
+    const pad = " ".repeat(spaces);
+    return text.split(`
+`).map((line) => line ? pad + line : line).join(`
+`);
+  }
+  function quoteLines(text) {
+    return text.split(`
+`).map((line) => line ? `> ${line}` : ">").join(`
+`);
+  }
+  function listItem(marker, text, children) {
+    if (children.length === 0)
+      return `${marker}${text}`;
+    const nested = blocksToMarkdown(children);
+    if (!nested)
+      return `${marker}${text}`;
+    const gap = LIST_TYPES.has(children[0].type) ? `
+` : `
+
+`;
+    return `${marker}${text}${gap}${indent(nested, marker.length)}`;
+  }
+  function withChildren(text, children) {
+    const nested = children.length ? blocksToMarkdown(children) : "";
+    if (!nested)
+      return text;
+    return text ? `${text}
+
+${nested}` : nested;
+  }
+  function tableCell(richText) {
+    return richTextToMarkdown(richText).replace(/\|/g, "\\|").replace(/\n/g, " ");
+  }
+  function tableToMarkdown(data, rows) {
+    const cells = rows.filter((row) => row.type === "table_row").map((row) => `| ${(row.table_row?.cells ?? []).map(tableCell).join(" | ")} |`);
+    if (cells.length === 0)
+      return null;
+    if (!data.has_column_header)
+      return cells.join(`
+`);
+    const width = rows[0]?.table_row?.cells?.length ?? 1;
+    const rule = `| ${Array.from({ length: width }, () => "---").join(" | ")} |`;
+    return [cells[0], rule, ...cells.slice(1)].join(`
+`);
+  }
+  function fileBlockUrl(block, data) {
+    if (data.type === "external")
+      return data.external?.url ?? "";
+    return block._local_url ?? null;
+  }
   function blockToMarkdown(block) {
     const type = block.type;
     const data = block[type];
     if (!data)
       return null;
+    const children = block.children ?? [];
     switch (type) {
       case "paragraph":
-        return richTextToMarkdown(data.rich_text);
+        return withChildren(richTextToMarkdown(data.rich_text), children);
       case "heading_1":
-        return `# ${richTextToMarkdown(data.rich_text)}`;
+        return withChildren(`# ${richTextToMarkdown(data.rich_text)}`, children);
       case "heading_2":
-        return `## ${richTextToMarkdown(data.rich_text)}`;
+        return withChildren(`## ${richTextToMarkdown(data.rich_text)}`, children);
       case "heading_3":
-        return `### ${richTextToMarkdown(data.rich_text)}`;
+        return withChildren(`### ${richTextToMarkdown(data.rich_text)}`, children);
       case "bulleted_list_item":
-        return `- ${richTextToMarkdown(data.rich_text)}`;
+        return listItem("- ", richTextToMarkdown(data.rich_text), children);
       case "numbered_list_item":
-        return `1. ${richTextToMarkdown(data.rich_text)}`;
+        return listItem("1. ", richTextToMarkdown(data.rich_text), children);
       case "to_do":
-        return `- [${data.checked ? "x" : " "}] ${richTextToMarkdown(data.rich_text)}`;
+        return listItem("- ", `[${data.checked ? "x" : " "}] ${richTextToMarkdown(data.rich_text)}`, children);
       case "code": {
         const lang = data.language && data.language !== "plain text" ? data.language : "";
         const code = (data.rich_text ?? []).map((r) => r.plain_text).join("");
@@ -1125,33 +1188,63 @@ ${code}
 *${caption}*` : block_md;
       }
       case "quote":
-        return `> ${richTextToMarkdown(data.rich_text)}`;
+        return quoteLines(withChildren(richTextToMarkdown(data.rich_text), children));
       case "callout": {
         const icon = data.icon?.emoji ? `${data.icon.emoji} ` : "";
-        return `> ${icon}${richTextToMarkdown(data.rich_text)}`;
+        return quoteLines(withChildren(`${icon}${richTextToMarkdown(data.rich_text)}`, children));
       }
       case "divider":
         return "---";
       case "image": {
-        const url = data.type === "external" ? data.external?.url ?? "" : data.file?.url ?? "";
+        const url = fileBlockUrl(block, data);
+        if (!url)
+          return null;
         const caption = richTextToMarkdown(data.caption ?? []);
         return `![${caption}](${url})`;
       }
       case "video": {
-        const url = data.type === "external" ? data.external?.url ?? "" : data.file?.url ?? "";
+        const url = fileBlockUrl(block, data);
+        if (!url)
+          return null;
         const caption = richTextToMarkdown(data.caption ?? []);
         return caption ? `[\u25B6 ${caption}](${url})` : `[\u25B6 Watch video](${url})`;
       }
-      case "bookmark":
-      case "link_preview": {
-        const url = data.url ?? "";
-        return `[${url}](${url})`;
+      case "file":
+      case "pdf":
+      case "audio": {
+        const url = fileBlockUrl(block, data);
+        if (!url)
+          return null;
+        const label = richTextToMarkdown(data.caption ?? []) || data.name || "Download the file";
+        return `[${label}](${url})`;
       }
-      case "toggle":
-        return `<details>
-<summary>${richTextToMarkdown(data.rich_text)}</summary>
+      case "bookmark":
+      case "link_preview":
+      case "embed": {
+        const url = data.url ?? "";
+        if (!url)
+          return null;
+        const caption = richTextToMarkdown(data.caption ?? []);
+        return `[${caption || url}](${url})`;
+      }
+      case "equation":
+        return data.expression ? `\`${data.expression}\`` : null;
+      case "toggle": {
+        const summary = escapeHtml(richTextToPlain(data.rich_text));
+        const body = children.length ? blocksToMarkdown(children) : "";
+        return `<details markdown="1">
+<summary>${summary}</summary>
 
-</details>`;
+${body ? `${body}
+
+` : ""}</details>`;
+      }
+      case "column_list":
+      case "column":
+      case "synced_block":
+        return children.length ? blocksToMarkdown(children) || null : null;
+      case "table":
+        return tableToMarkdown(data, children);
       case "table_of_contents":
         return "";
       case "child_page":
@@ -1180,15 +1273,35 @@ ${code}
     return lines.join(`
 `).trim();
   }
+  function protectLiquid(body) {
+    if (!/\{[{%]/.test(body))
+      return body;
+    const safe = body.replace(/\{%-?\s*endraw\s*-?%\}/g, '{% endraw %}{{ "{%" }} endraw %}{% raw %}');
+    return `{% raw %}
+${safe}
+{% endraw %}`;
+  }
+  var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function withRateLimitRetry(call) {
+    for (let attempt = 0;; attempt++) {
+      try {
+        return await call();
+      } catch (err) {
+        if (err?.code !== "rate_limited" || attempt >= 3)
+          throw err;
+        await sleep(1000 * 2 ** attempt);
+      }
+    }
+  }
   async function fetchAllBlocks(blockId) {
     const blocks = [];
     let cursor;
     do {
-      const res = await notion.blocks.children.list({
+      const res = await withRateLimitRetry(() => notion.blocks.children.list({
         block_id: blockId,
         start_cursor: cursor,
         page_size: 100
-      });
+      }));
       blocks.push(...res.results);
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
@@ -1198,32 +1311,380 @@ ${code}
     const pages = [];
     let cursor;
     do {
-      const res = await notion.databases.query({
+      const res = await withRateLimitRetry(() => notion.databases.query({
         database_id: databaseId,
         filter: { property: "Status", select: { equals: statusValue } },
         start_cursor: cursor
-      });
+      }));
       pages.push(...res.results);
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
     return pages;
   }
+  var RENDERED_BLOCK_TYPES = new Set([
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "code",
+    "quote",
+    "callout",
+    "divider",
+    "image",
+    "video",
+    "file",
+    "pdf",
+    "audio",
+    "bookmark",
+    "link_preview",
+    "embed",
+    "equation",
+    "toggle",
+    "column_list",
+    "column",
+    "synced_block",
+    "table",
+    "table_row"
+  ]);
+  var SILENT_BLOCK_TYPES = new Set(["table_of_contents", "breadcrumb"]);
+  var FILE_BLOCK_TYPES = new Set(["image", "video", "file", "pdf", "audio"]);
+  var MAX_BLOCK_DEPTH = 3;
+  async function prepareBlocks(blocks, ctx, depth = 1) {
+    for (const block of blocks) {
+      if (!RENDERED_BLOCK_TYPES.has(block.type)) {
+        if (!SILENT_BLOCK_TYPES.has(block.type))
+          ctx.skippedBlocks++;
+        continue;
+      }
+      const syncedFrom = block.type === "synced_block" ? block.synced_block?.synced_from?.block_id : null;
+      if (block.has_children || syncedFrom) {
+        if (depth >= MAX_BLOCK_DEPTH) {
+          ctx.skippedBlocks++;
+        } else if (syncedFrom) {
+          try {
+            block.children = await fetchAllBlocks(syncedFrom);
+            await prepareBlocks(block.children, ctx, depth + 1);
+          } catch {
+            ctx.skippedBlocks++;
+          }
+        } else {
+          block.children = await fetchAllBlocks(block.id);
+          await prepareBlocks(block.children, ctx, depth + 1);
+        }
+      }
+      const data = block[block.type];
+      if (FILE_BLOCK_TYPES.has(block.type) && data?.type === "file") {
+        block._local_url = await localizeFile(data.file?.url, ctx);
+      }
+    }
+  }
+  async function renderPageBody(pageId, ctx) {
+    const blocks = await fetchAllBlocks(pageId);
+    await prepareBlocks(blocks, ctx);
+    return blocksToMarkdown(blocks);
+  }
+  var ASSETS_SUBDIR = "assets/notion";
+  var NOTION_FILE_HOSTS = [
+    "prod-files-secure.s3.us-west-2.amazonaws.com",
+    "s3.us-west-2.amazonaws.com",
+    "file.notion.so"
+  ];
+  var MAX_FILE_BYTES = 20 * 1024 * 1024;
+  var MAX_FILE_MB = MAX_FILE_BYTES / (1024 * 1024);
+  var FILE_TYPES = {
+    jpg: "image",
+    jpeg: "image",
+    png: "image",
+    gif: "image",
+    webp: "image",
+    avif: "image",
+    mp4: "video",
+    webm: "video",
+    mov: "video",
+    m4v: "video",
+    mp3: "audio",
+    m4a: "audio",
+    wav: "audio",
+    ogg: "audio",
+    pdf: "application",
+    epub: "application",
+    zip: "application",
+    doc: "application",
+    docx: "application",
+    xls: "application",
+    xlsx: "application",
+    ppt: "application",
+    pptx: "application",
+    odt: "application",
+    ods: "application",
+    odp: "application",
+    txt: "text",
+    csv: "text"
+  };
+  var GENERIC_CONTENT_TYPES = new Set(["application/octet-stream", "binary/octet-stream"]);
+
+  class FileProblem extends Error {
+    constructor(code) {
+      super(code);
+      this.code = code;
+    }
+  }
+  function stableHash(text) {
+    let h1 = 3735928559;
+    let h2 = 1103547991;
+    for (let i = 0;i < text.length; i++) {
+      const ch = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+    h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0").slice(0, 12);
+  }
+  function isAllowedFileUrl(url) {
+    if (TEST_FILE_HOST && url.host === TEST_FILE_HOST)
+      return true;
+    return url.protocol === "https:" && NOTION_FILE_HOSTS.includes(url.hostname);
+  }
+  function safeFileName(raw) {
+    let name;
+    try {
+      name = decodeURIComponent(raw);
+    } catch {
+      name = raw;
+    }
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "";
+    const stem = slugify(dot > 0 ? name.slice(0, dot) : name).slice(0, 60) || "file";
+    return { stem, ext };
+  }
+  async function readCapped(res) {
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_FILE_BYTES)
+      throw new FileProblem("file_too_large");
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of res.body) {
+      size += chunk.byteLength;
+      if (size > MAX_FILE_BYTES)
+        throw new FileProblem("file_too_large");
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+  }
+  async function downloadFile(url, family, dest) {
+    let res;
+    try {
+      res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(60000) });
+    } catch {
+      throw new FileProblem("file_unavailable");
+    }
+    let finalUrl;
+    try {
+      finalUrl = new URL(res.url || url.href);
+    } catch {
+      finalUrl = url;
+    }
+    if (!res.ok || !isAllowedFileUrl(finalUrl))
+      throw new FileProblem("file_unavailable");
+    const contentType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (contentType && !GENERIC_CONTENT_TYPES.has(contentType) && contentType.split("/")[0] !== family) {
+      throw new FileProblem("file_type_unsupported");
+    }
+    const bytes = await readCapped(res);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const partial = `${dest}.partial`;
+    fs.writeFileSync(partial, bytes);
+    fs.renameSync(partial, dest);
+  }
+  async function localizeFile(rawUrl, ctx) {
+    let url;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return noteFileProblem(ctx, "file_unavailable");
+    }
+    if (!isAllowedFileUrl(url))
+      return noteFileProblem(ctx, "file_unavailable");
+    const { stem, ext } = safeFileName(url.pathname.split("/").pop() ?? "");
+    const family = FILE_TYPES[ext];
+    if (!family)
+      return noteFileProblem(ctx, "file_type_unsupported");
+    const name = `${stableHash(url.pathname)}-${stem}.${ext}`;
+    const dest = path.join(ASSETS_DIR, name);
+    if (!fs.existsSync(dest)) {
+      try {
+        await downloadFile(url, family, dest);
+        ctx.assets.downloaded++;
+        console.log(`     downloaded: ${ASSETS_SUBDIR}/${name}`);
+      } catch (err) {
+        return noteFileProblem(ctx, err instanceof FileProblem ? err.code : "file_unavailable");
+      }
+    }
+    return `${ASSET_URL_PREFIX}${name}`;
+  }
+  function noteFileProblem(ctx, code) {
+    ctx.fileProblems.push(code);
+    console.warn(`     [skipped file] ${FILE_PROBLEM_TEXT[code] ?? code}`);
+    return null;
+  }
+  async function filesPropertyUrl(prop, ctx) {
+    const first = prop?.files?.[0];
+    if (!first)
+      return "";
+    if (first.type === "external" || first.external)
+      return first.external?.url ?? "";
+    return await localizeFile(first.file?.url, ctx) ?? "";
+  }
+  function pruneAssets() {
+    if (!fs.existsSync(ASSETS_DIR))
+      return 0;
+    const linked = new Set;
+    const scan = (file) => {
+      let text;
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch {
+        return;
+      }
+      for (const m of text.matchAll(/assets\/notion\/([A-Za-z0-9._-]+)/g))
+        linked.add(m[1]);
+    };
+    for (const dir of [POSTS_DIR, PAGES_DIR]) {
+      if (!fs.existsSync(dir))
+        continue;
+      for (const f of fs.readdirSync(dir))
+        if (f.endsWith(".md"))
+          scan(path.join(dir, f));
+    }
+    scan(path.join(DATA_DIR, "home.yml"));
+    let removed = 0;
+    for (const f of fs.readdirSync(ASSETS_DIR)) {
+      if (linked.has(f))
+        continue;
+      try {
+        fs.unlinkSync(path.join(ASSETS_DIR, f));
+        removed++;
+        console.log(`   removed (no longer used): ${ASSETS_SUBDIR}/${f}`);
+      } catch {}
+    }
+    return removed;
+  }
+  var TRANSLITERATE = { \u{df}: "ss", \u{e6}: "ae", \u{153}: "oe", \u{f8}: "o", \u{111}: "d", \u{f0}: "d", \u{142}: "l", \u{fe}: "th", \u{131}: "i" };
+  function slugify(text) {
+    return String(text ?? "").normalize("NFKD").replace(/[\u0300-\u036F]/g, "").toLowerCase().replace(/[\u00DF\u00E6\u0153\u00F8\u0111\u00F0\u0142\u00FE\u0131]/g, (ch) => TRANSLITERATE[ch]).replace(/['\u2019"`]/g, "").replace(/[^a-z0-9_]+/g, "-").replace(/-+/g, "-").replace(/^[-_]+|[-_]+$/g, "").slice(0, 80).replace(/[-_]+$/, "");
+  }
   function titleToSlug(title) {
-    return title.toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    return slugify(title);
+  }
+  var SAFE_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+  function resolveSlug({ typed, title, existingSlug, pageId }) {
+    const typedClean = String(typed ?? "").trim();
+    if (typedClean) {
+      if (SAFE_SLUG.test(typedClean))
+        return typedClean;
+      const cleaned = slugify(typedClean);
+      if (cleaned)
+        return cleaned;
+    }
+    if (existingSlug && SAFE_SLUG.test(existingSlug))
+      return existingSlug;
+    return slugify(title) || `page-${String(pageId).replace(/-/g, "").slice(0, 8)}`;
   }
   function yamlStr(value) {
     return JSON.stringify(String(value ?? ""));
   }
+  function findProp(props, names) {
+    for (const name of names) {
+      if (props[name] !== undefined)
+        return props[name];
+    }
+    return;
+  }
+  function propText(prop) {
+    if (!prop)
+      return "";
+    if (Array.isArray(prop.title))
+      return richTextToPlain(prop.title);
+    if (Array.isArray(prop.rich_text))
+      return richTextToPlain(prop.rich_text);
+    return "";
+  }
+  function rowTitle(props) {
+    const titleProp = Object.values(props).find((prop) => prop?.type === "title") ?? findProp(props, ["Title", "title", "Name"]);
+    return propText(titleProp).trim() || "Untitled";
+  }
+  var PAGE_COLUMNS = {
+    slug: ["Slug", "slug", "Web address", "Web Address"],
+    type: ["Type", "type"],
+    navOrder: ["Nav Order", "Nav order", "Order", "Menu order", "Menu Order"],
+    showInNav: ["Show in Nav", "Show In Nav", "Nav", "Show in menu", "Show in Menu"],
+    description: ["Description", "Excerpt", "Summary"],
+    name: ["Name", "Display Name", "Author Name"],
+    picture: ["Profile Picture", "Avatar", "Photo"],
+    tagline: ["Tagline", "Short Bio", "Subtitle"],
+    social: ["Social Links", "Socials", "Links"]
+  };
+  var POST_COLUMNS = {
+    slug: ["Slug", "slug", "Web address", "Web Address"],
+    date: ["Publish Date", "Date", "Published"],
+    tags: ["Tags"],
+    description: ["Description", "Excerpt", "Summary"],
+    cover: ["Cover Image", "Cover image", "Cover"],
+    canonical: ["Canonical URL", "Originally published at"],
+    featured: ["Featured"]
+  };
+  var TYPE_LABELS = {
+    "home page": "home",
+    "list of posts": "blog-list",
+    "regular page": "markdown"
+  };
+  function normalizePageType(raw) {
+    const value = String(raw ?? "").trim().toLowerCase();
+    if (!value)
+      return "markdown";
+    return TYPE_LABELS[value] ?? value;
+  }
+  var SAMPLE_SLUGS = new Set(["welcome-to-inkdrafts"]);
+  function readFrontMatter(file) {
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      const head = text.startsWith("---") ? text.slice(0, text.indexOf(`
+---`, 3) + 1) : "";
+      const field = (key) => {
+        const m = head.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
+        if (!m)
+          return "";
+        const raw = m[1].trim();
+        if (raw.startsWith('"')) {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return raw.slice(1, -1);
+          }
+        }
+        return raw;
+      };
+      return { slug: field("slug"), title: field("title") };
+    } catch {
+      return { slug: "", title: "" };
+    }
+  }
   function applyDeletions(dir, label, notionIdToFile, processedIds) {
     const stale = [...notionIdToFile].filter(([id]) => !processedIds.has(id));
     if (stale.length === 0)
-      return 0;
+      return { deleted: 0, guard: null };
     const tracked = notionIdToFile.size;
     const ratio = stale.length / tracked;
-    const suspicious = processedIds.size === 0 || stale.length > 1 && ratio > MAX_DELETE_RATIO;
+    const fronts = stale.map(([, f]) => readFrontMatter(path.join(dir, f)));
+    const onlySamples = fronts.every((fm) => SAMPLE_SLUGS.has(fm.slug));
+    const suspicious = !onlySamples && (processedIds.size === 0 || stale.length > 2 && ratio > MAX_DELETE_RATIO);
     if (suspicious && !ALLOW_BULK_DELETE) {
       console.error(`
-   ABORT: this sync would delete ${stale.length} of ${tracked} tracked ${label} ` + `(${Math.round(ratio * 100)}%).
+   HELD BACK: this sync would delete ${stale.length} of ${tracked} tracked ${label} ` + `(${Math.round(ratio * 100)}%).
 ` + `   Notion returned ${processedIds.size} published row(s), which usually means the
 ` + `   database was misread \u2014 a renamed Status option, a revoked integration share,
 ` + `   or a partial API response \u2014 not that you unpublished them.
@@ -1232,14 +1693,18 @@ ${code}
 ` + stale.map(([, f]) => `     - ${f}`).join(`
 `) + `
 
-` + `   Nothing was changed. Check the database in Notion. If the deletion is real,
+` + `   Those files were kept. Check the database in Notion. If the deletion is real,
 ` + `   re-run this workflow with ALLOW_BULK_DELETE=true.`);
-      throw new GuardError(`bulk-delete guard tripped for ${label}`, {
-        label,
-        staleCount: stale.length,
-        trackedCount: tracked,
-        ratio
-      });
+      return {
+        deleted: 0,
+        guard: {
+          label,
+          staleCount: stale.length,
+          trackedCount: tracked,
+          ratio,
+          titles: fronts.map((fm, i) => fm.title || stale[i][1])
+        }
+      };
     }
     if (suspicious) {
       console.log(`
@@ -1256,7 +1721,7 @@ ${code}
         console.warn(`   Warning: could not remove ${filename}`);
       }
     }
-    return deleted;
+    return { deleted, guard: null };
   }
   function buildNavYaml(items) {
     if (items.length === 0)
@@ -1295,7 +1760,9 @@ ${code}
 `) + `
 `;
   }
-  function syncConfigIdentity(name) {
+  var LEGACY_DESCRIPTION = "A Notion-powered Jekyll site.";
+  var NEUTRAL_DESCRIPTION = "A personal website, written in Notion.";
+  function syncConfigIdentity(name, description = "") {
     if (!name)
       return false;
     const configPath = path.join(ROOT_DIR, "_config.yml");
@@ -1318,6 +1785,13 @@ ${code}
       if (!isIndented && /^title:/.test(line)) {
         sawTitle = true;
         return `title: ${yamlStr(name)}`;
+      }
+      if (!isIndented && /^description:/.test(line)) {
+        if (description)
+          return `description: ${yamlStr(description)}`;
+        if (line.includes(LEGACY_DESCRIPTION))
+          return `description: ${yamlStr(NEUTRAL_DESCRIPTION)}`;
+        return line;
       }
       if (inAuthor && isIndented && /^[ \t]+name:/.test(line)) {
         sawAuthorName = true;
@@ -1353,28 +1827,106 @@ ${code}
       return { name, url: url.startsWith("//") ? `https:${url}` : url };
     }).filter(Boolean);
   }
-  function extractPageMeta(page) {
+  function newStats() {
+    return { created: 0, updated: 0, renamed: 0, deleted: 0, unchanged: 0, errors: 0, scheduled: 0, skipped_blocks: 0 };
+  }
+  function rowContext(section, title, assets) {
+    return { section, title, skippedBlocks: 0, fileProblems: [], assets };
+  }
+  function recordSkipped(report, ctx) {
+    report.stats.skipped_blocks += ctx.skippedBlocks;
+    if (ctx.skippedBlocks > 0) {
+      report.skipped.push({ section: ctx.section, title: ctx.title, reason_code: "blocks_unsupported", count: ctx.skippedBlocks });
+    }
+    const byCode = new Map;
+    for (const code of ctx.fileProblems)
+      byCode.set(code, (byCode.get(code) ?? 0) + 1);
+    for (const [code, count] of byCode) {
+      report.skipped.push({ section: ctx.section, title: ctx.title, reason_code: code, count });
+    }
+  }
+  function indexByNotionId(dir) {
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+    const notionIdToFile = new Map;
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(dir, file), "utf8");
+        const match = content.match(/^notion_id:\s*"?([a-f0-9-]{36})"?/m);
+        if (match)
+          notionIdToFile.set(match[1], file);
+      } catch {}
+    }
+    return { files, notionIdToFile };
+  }
+  function findAddressClashes(planned, notionIdToFile) {
+    const byFile = new Map;
+    for (const item of planned) {
+      const list = byFile.get(item.filename) ?? [];
+      list.push(item);
+      byFile.set(item.filename, list);
+    }
+    const losers = new Set;
+    for (const [filename, list] of byFile) {
+      if (list.length < 2)
+        continue;
+      const owner = list.find((item) => notionIdToFile.get(item.page.id) === filename) ?? list[0];
+      for (const item of list)
+        if (item !== owner)
+          losers.add(item.page.id);
+    }
+    return losers;
+  }
+  function writeRowFile(dir, label, filename, content, prevFilename, existingFiles, stats) {
+    const filePath = path.join(dir, filename);
+    const renamed = Boolean(prevFilename && prevFilename !== filename);
+    if (renamed) {
+      try {
+        fs.unlinkSync(path.join(dir, prevFilename));
+      } catch {}
+      stats.renamed++;
+      console.log(`     renamed: ${prevFilename} \u2192 ${filename}`);
+    }
+    const needsWrite = !fs.existsSync(filePath) || fs.readFileSync(filePath, "utf8") !== content;
+    if (!needsWrite) {
+      console.log("     unchanged");
+      stats.unchanged++;
+      return;
+    }
+    fs.writeFileSync(filePath, content, "utf8");
+    if (renamed) {
+      console.log(`     wrote: ${label}${filename}`);
+      return;
+    }
+    const isNew = !existingFiles.includes(filename);
+    console.log(`     ${isNew ? "created" : "updated"}: ${label}${filename}`);
+    isNew ? stats.created++ : stats.updated++;
+  }
+  function rowFailure(report, section, title, reasonCode, err) {
+    report.stats.errors++;
+    report.failed.push({ section, title, reason_code: reasonCode });
+    console.error(`     [error] ${err ? err.message : ROW_PROBLEM_TEXT[reasonCode]}`);
+  }
+  function reasonForRowError(err) {
+    return err && typeof err.code === "string" && err.status ? "read_failed" : "unexpected";
+  }
+  function extractPageMeta(page, existingSlug = "") {
     const props = page.properties;
-    const titleProp = props.Title ?? props.title ?? props.Name;
-    const title = titleProp?.title?.[0]?.plain_text ?? titleProp?.rich_text?.[0]?.plain_text ?? "Untitled";
-    const slugProp = props.Slug ?? props.slug;
-    const slug = slugProp?.rich_text?.[0]?.plain_text?.trim() || titleToSlug(title);
-    const typeProp = props.Type ?? props.type;
-    const type = typeProp?.select?.name?.toLowerCase() ?? "markdown";
-    const navOrderProp = props["Nav Order"] ?? props["Nav order"] ?? props["Order"];
-    const navOrder = navOrderProp?.number ?? 99;
-    const showInNavProp = props["Show in Nav"] ?? props["Show In Nav"] ?? props["Nav"];
-    const showInNav = showInNavProp?.checkbox ?? false;
-    const descProp = props.Description ?? props.Excerpt ?? props.Summary;
-    const description = descProp?.rich_text?.[0]?.plain_text?.trim() ?? "";
-    const nameProp = props["Name"] ?? props["Display Name"] ?? props["Author Name"];
-    const displayName = nameProp?.rich_text?.[0]?.plain_text?.trim() || title;
-    const picProp = props["Profile Picture"] ?? props["Avatar"] ?? props["Photo"];
-    const profile_picture = picProp?.rich_text?.[0]?.plain_text?.trim() ?? "";
-    const taglineProp = props.Tagline ?? props["Short Bio"] ?? props.Subtitle;
-    const tagline = taglineProp?.rich_text?.[0]?.plain_text?.trim() ?? "";
-    const socialProp = props["Social Links"] ?? props["Socials"] ?? props["Links"];
-    const socialRaw = socialProp?.rich_text?.map((r) => r.plain_text).join("") ?? "";
+    const title = rowTitle(props);
+    const slug = resolveSlug({
+      typed: propText(findProp(props, PAGE_COLUMNS.slug)),
+      title,
+      existingSlug,
+      pageId: page.id
+    });
+    const type = normalizePageType(findProp(props, PAGE_COLUMNS.type)?.select?.name);
+    const navOrder = findProp(props, PAGE_COLUMNS.navOrder)?.number ?? 99;
+    const showInNav = findProp(props, PAGE_COLUMNS.showInNav)?.checkbox ?? false;
+    const description = propText(findProp(props, PAGE_COLUMNS.description)).trim();
+    const displayName = propText(findProp(props, PAGE_COLUMNS.name)).trim() || title;
+    const picProp = findProp(props, PAGE_COLUMNS.picture);
+    const profile_picture = propText(picProp).trim();
+    const tagline = propText(findProp(props, PAGE_COLUMNS.tagline)).trim();
+    const socialRaw = propText(findProp(props, PAGE_COLUMNS.social));
     const social_links = parseSocialLinks(socialRaw);
     return { title, displayName, slug, type, navOrder, showInNav, description, profile_picture, tagline, social_links };
   }
@@ -1382,7 +1934,7 @@ ${code}
     const lines = ["---"];
     lines.push(`layout: ${layout}`);
     lines.push(`title: ${yamlStr(meta.title)}`);
-    lines.push(`slug: ${meta.slug}`);
+    lines.push(`slug: ${yamlStr(meta.slug)}`);
     if (meta.description)
       lines.push(`description: ${yamlStr(meta.description)}`);
     lines.push(`notion_id: ${yamlStr(notionId)}`);
@@ -1391,7 +1943,7 @@ ${code}
 `);
   }
   function typeToLayout(type) {
-    switch (type) {
+    switch (normalizePageType(type)) {
       case "blog-list":
       case "blog":
         return "blog";
@@ -1401,22 +1953,16 @@ ${code}
         return "page";
     }
   }
-  async function syncPages() {
+  function newReport() {
+    return { stats: newStats(), failed: [], skipped: [], guard: null };
+  }
+  async function syncPages(assets) {
     console.log(`
 \u2500\u2500 Pages sync \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`);
     console.log(`   Database: ${PAGES_DB_ID}`);
     fs.mkdirSync(PAGES_DIR, { recursive: true });
     fs.mkdirSync(DATA_DIR, { recursive: true });
-    const existingFiles = fs.readdirSync(PAGES_DIR).filter((f) => f.endsWith(".md"));
-    const notionIdToFile = new Map;
-    for (const file of existingFiles) {
-      try {
-        const content = fs.readFileSync(path.join(PAGES_DIR, file), "utf8");
-        const match = content.match(/^notion_id:\s*"?([a-f0-9-]{36})"?/m);
-        if (match)
-          notionIdToFile.set(match[1], file);
-      } catch {}
-    }
+    const { files: existingFiles, notionIdToFile } = indexByNotionId(PAGES_DIR);
     let publishedPages;
     try {
       publishedPages = await fetchPublished(PAGES_DB_ID);
@@ -1428,18 +1974,29 @@ ${code}
     const navItems = [];
     let homeData = null;
     const processedIds = new Set;
-    const stats = { created: 0, updated: 0, renamed: 0, deleted: 0, unchanged: 0, errors: 0 };
+    const report = newReport();
+    const { stats } = report;
+    const planned = [];
     for (const page of publishedPages) {
       processedIds.add(page.id);
+      const prev = notionIdToFile.get(page.id);
       let meta;
       try {
-        meta = extractPageMeta(page);
+        meta = extractPageMeta(page, prev ? readFrontMatter(path.join(PAGES_DIR, prev)).slug : "");
       } catch (err) {
         console.error(`   [skip] Cannot read metadata for ${page.id}: ${err.message}`);
-        stats.errors++;
+        rowFailure(report, "pages", rowTitleSafe(page), "unexpected", err);
         continue;
       }
+      planned.push({ page, meta, filename: meta.type === "home" ? null : `${meta.slug}.md` });
+    }
+    const clashes = findAddressClashes(planned.filter((p) => p.filename), notionIdToFile);
+    for (const { page, meta, filename } of planned) {
       console.log(`   \u2192 "${meta.title}" (${meta.type}, /${meta.slug})`);
+      if (clashes.has(page.id)) {
+        rowFailure(report, "pages", meta.title, "duplicate_web_address");
+        continue;
+      }
       if (meta.showInNav) {
         navItems.push({
           title: meta.title,
@@ -1447,68 +2004,52 @@ ${code}
           order: meta.navOrder
         });
       }
+      const ctx = rowContext("pages", meta.title, assets);
       if (meta.type === "home") {
         try {
-          const blocks = await fetchAllBlocks(page.id);
-          const bio = blocksToMarkdown(blocks);
+          const bio = await renderPageBody(page.id, ctx);
+          const picProp = findProp(page.properties, PAGE_COLUMNS.picture);
+          const profile_picture = picProp?.files ? await filesPropertyUrl(picProp, ctx) : meta.profile_picture;
           homeData = {
             name: meta.displayName,
             tagline: meta.tagline,
-            profile_picture: meta.profile_picture,
+            description: meta.description,
+            profile_picture,
             social_links: meta.social_links,
             bio,
             notion_id: page.id
           };
+          recordSkipped(report, ctx);
           console.log("     home data collected");
         } catch (err) {
-          console.error(`     [error] ${err.message}`);
-          stats.errors++;
+          rowFailure(report, "pages", meta.title, reasonForRowError(err), err);
         }
         continue;
       }
       try {
-        const blocks = await fetchAllBlocks(page.id);
-        const body = blocksToMarkdown(blocks);
+        const body = protectLiquid(await renderPageBody(page.id, ctx));
         const layout = typeToLayout(meta.type);
         const fm = buildPageFrontMatter(meta, page.id, layout);
         const content = `${fm}
 
 ${body}
 `;
-        const filename = `${meta.slug}.md`;
-        const filePath = path.join(PAGES_DIR, filename);
-        const prevFilename = notionIdToFile.get(page.id);
-        const renamed = Boolean(prevFilename && prevFilename !== filename);
-        if (renamed) {
-          try {
-            fs.unlinkSync(path.join(PAGES_DIR, prevFilename));
-          } catch {}
-          stats.renamed++;
-          console.log(`     renamed: ${prevFilename} \u2192 ${filename}`);
-        }
-        let needsWrite = true;
-        if (fs.existsSync(filePath)) {
-          needsWrite = fs.readFileSync(filePath, "utf8") !== content;
-        }
-        if (needsWrite) {
-          fs.writeFileSync(filePath, content, "utf8");
-          if (!renamed) {
-            const isNew = !existingFiles.includes(filename);
-            console.log(`     ${isNew ? "created" : "updated"}: _pages/${filename}`);
-            isNew ? stats.created++ : stats.updated++;
-          } else {
-            console.log(`     wrote: _pages/${filename}`);
-          }
-        } else {
-          console.log("     unchanged");
-          stats.unchanged++;
-        }
+        writeRowFile(PAGES_DIR, "_pages/", filename, content, notionIdToFile.get(page.id), existingFiles, stats);
+        recordSkipped(report, ctx);
       } catch (err) {
-        console.error(`     [error] ${err.message}`);
-        stats.errors++;
+        rowFailure(report, "pages", meta.title, reasonForRowError(err), err);
       }
     }
-    stats.deleted += applyDeletions(PAGES_DIR, "pages", notionIdToFile, processedIds);
+    const deletion = applyDeletions(PAGES_DIR, "pages", notionIdToFile, processedIds);
+    stats.deleted += deletion.deleted;
+    report.guard = deletion.guard;
+    if (report.guard) {
+      console.log(`
+   kept as they were: _data/nav.yml, _data/home.yml, _config.yml`);
+      console.log(`
+   Created: ${stats.created} | Updated: ${stats.updated} | Unchanged: ${stats.unchanged} | Errors: ${stats.errors}`);
+      return { ...report, navChanged: false, homeChanged: false, configChanged: false };
+    }
     navItems.sort((a, b) => a.order - b.order);
     const navYaml = buildNavYaml(navItems);
     const navPath = path.join(DATA_DIR, "nav.yml");
@@ -1536,27 +2077,47 @@ ${body}
       } else {
         console.log("   unchanged: _data/home.yml");
       }
-      configChanged = syncConfigIdentity(homeData.name);
+      configChanged = syncConfigIdentity(homeData.name, homeData.tagline || homeData.description);
     }
     console.log(`
    Created: ${stats.created} | Updated: ${stats.updated} | Unchanged: ${stats.unchanged} | Errors: ${stats.errors}`);
-    return { stats, navChanged, homeChanged, configChanged };
+    return { ...report, navChanged, homeChanged, configChanged };
   }
-  function extractPostMeta(page) {
+  function rowTitleSafe(page) {
+    try {
+      return rowTitle(page.properties ?? {});
+    } catch {
+      return "Untitled";
+    }
+  }
+  function todayDate(now = new Date) {
+    return now.toISOString().slice(0, 10);
+  }
+  function isFutureDate(date, now = new Date) {
+    if (!date)
+      return false;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date))
+      return date > todayDate(now);
+    const at = Date.parse(date);
+    return Number.isFinite(at) && at > now.getTime();
+  }
+  function extractPostMeta(page, existingSlug = "") {
     const props = page.properties;
-    const titleProp = props.Title ?? props.title ?? props.Name;
-    const title = titleProp?.title?.[0]?.plain_text ?? titleProp?.rich_text?.[0]?.plain_text ?? "Untitled";
-    const slugProp = props.Slug ?? props.slug;
-    const slug = slugProp?.rich_text?.[0]?.plain_text?.trim() || titleToSlug(title);
-    const dateProp = props["Publish Date"] ?? props.Date ?? props.Published;
-    const date = dateProp?.date?.start ?? new Date().toISOString().split("T")[0];
-    const tags = (props.Tags?.multi_select ?? []).map((t) => t.name);
-    const descProp = props.Description ?? props.Excerpt ?? props.Summary;
-    const description = descProp?.rich_text?.[0]?.plain_text?.trim() ?? "";
-    const coverFiles = props["Cover Image"]?.files ?? [];
+    const title = rowTitle(props);
+    const slug = resolveSlug({
+      typed: propText(findProp(props, POST_COLUMNS.slug)),
+      title,
+      existingSlug,
+      pageId: page.id
+    });
+    const dateProp = findProp(props, POST_COLUMNS.date);
+    const date = dateProp?.date?.start ?? (page.created_time ? String(page.created_time).slice(0, 10) : todayDate());
+    const tags = (findProp(props, POST_COLUMNS.tags)?.multi_select ?? []).map((t) => t.name);
+    const description = propText(findProp(props, POST_COLUMNS.description)).trim();
+    const coverFiles = findProp(props, POST_COLUMNS.cover)?.files ?? [];
     const coverImage = coverFiles[0]?.external?.url ?? coverFiles[0]?.file?.url ?? "";
-    const canonicalUrl = props["Canonical URL"]?.url ?? "";
-    const featured = props.Featured?.checkbox ?? false;
+    const canonicalUrl = findProp(props, POST_COLUMNS.canonical)?.url ?? "";
+    const featured = findProp(props, POST_COLUMNS.featured)?.checkbox ?? false;
     return { title, slug, date, tags, description, coverImage, canonicalUrl, featured };
   }
   function buildPostFrontMatter(meta, notionId) {
@@ -1564,7 +2125,7 @@ ${body}
     lines.push(`layout: post`);
     lines.push(`title: ${yamlStr(meta.title)}`);
     lines.push(`date: ${meta.date}`);
-    lines.push(`slug: ${meta.slug}`);
+    lines.push(`slug: ${yamlStr(meta.slug)}`);
     if (meta.tags.length > 0) {
       lines.push(`tags: [${meta.tags.map(yamlStr).join(", ")}]`);
     }
@@ -1582,23 +2143,17 @@ ${body}
 `);
   }
   function postFilename(date, slug) {
-    return `${date}-${slug}.md`;
+    return `${String(date).slice(0, 10)}-${slug}.md`;
   }
-  async function syncPosts() {
+  function existingPostSlug(file) {
+    return readFrontMatter(path.join(POSTS_DIR, file)).slug || file.replace(/^\d{4}-\d{2}-\d{2}-/, "").replace(/\.md$/, "");
+  }
+  async function syncPosts(assets) {
     console.log(`
 \u2500\u2500 Posts sync \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`);
     console.log(`   Database: ${POSTS_DB_ID}`);
     fs.mkdirSync(POSTS_DIR, { recursive: true });
-    const existingFiles = fs.readdirSync(POSTS_DIR).filter((f) => f.endsWith(".md"));
-    const notionIdToFile = new Map;
-    for (const file of existingFiles) {
-      try {
-        const content = fs.readFileSync(path.join(POSTS_DIR, file), "utf8");
-        const match = content.match(/^notion_id:\s*"?([a-f0-9-]{36})"?/m);
-        if (match)
-          notionIdToFile.set(match[1], file);
-      } catch {}
-    }
+    const { files: existingFiles, notionIdToFile } = indexByNotionId(POSTS_DIR);
     console.log(`   Existing posts in _posts/: ${existingFiles.length}`);
     let publishedPages;
     try {
@@ -1609,66 +2164,59 @@ ${body}
     console.log(`   Published posts in Notion: ${publishedPages.length}
 `);
     const processedIds = new Set;
-    const stats = { created: 0, updated: 0, renamed: 0, deleted: 0, unchanged: 0, errors: 0 };
+    const report = newReport();
+    const { stats } = report;
+    const planned = [];
     for (const page of publishedPages) {
       processedIds.add(page.id);
+      const prev = notionIdToFile.get(page.id);
       let meta;
       try {
-        meta = extractPostMeta(page);
+        meta = extractPostMeta(page, prev ? existingPostSlug(prev) : "");
       } catch (err) {
         console.error(`   [skip] Cannot read metadata for ${page.id}: ${err.message}`);
-        stats.errors++;
+        rowFailure(report, "posts", rowTitleSafe(page), "unexpected", err);
         continue;
       }
+      if (isFutureDate(meta.date)) {
+        console.log(`   \u2192 "${meta.title}" waits for ${meta.date}`);
+        stats.scheduled++;
+        continue;
+      }
+      planned.push({ page, meta, filename: postFilename(meta.date, meta.slug) });
+    }
+    const clashes = findAddressClashes(planned, notionIdToFile);
+    for (const { page, meta, filename } of planned) {
       console.log(`   \u2192 "${meta.title}"`);
+      if (clashes.has(page.id)) {
+        rowFailure(report, "posts", meta.title, "duplicate_web_address");
+        continue;
+      }
+      const ctx = rowContext("posts", meta.title, assets);
       try {
-        const blocks = await fetchAllBlocks(page.id);
-        const body = blocksToMarkdown(blocks);
-        const fm = buildPostFrontMatter(meta, page.id);
+        const coverProp = findProp(page.properties, POST_COLUMNS.cover);
+        const coverImage = coverProp?.files?.length ? await filesPropertyUrl(coverProp, ctx) : "";
+        const body = protectLiquid(await renderPageBody(page.id, ctx));
+        const fm = buildPostFrontMatter({ ...meta, coverImage }, page.id);
         const content = `${fm}
 
 ${body}
 `;
-        const filename = postFilename(meta.date, meta.slug);
-        const filePath = path.join(POSTS_DIR, filename);
-        const prevFilename = notionIdToFile.get(page.id);
-        const renamed = Boolean(prevFilename && prevFilename !== filename);
-        if (renamed) {
-          try {
-            fs.unlinkSync(path.join(POSTS_DIR, prevFilename));
-          } catch {}
-          stats.renamed++;
-          console.log(`     renamed: ${prevFilename} \u2192 ${filename}`);
-        }
-        let needsWrite = true;
-        if (fs.existsSync(filePath)) {
-          needsWrite = fs.readFileSync(filePath, "utf8") !== content;
-        }
-        if (needsWrite) {
-          fs.writeFileSync(filePath, content, "utf8");
-          if (!renamed) {
-            const isNew = !existingFiles.includes(filename);
-            console.log(`     ${isNew ? "created" : "updated"}: ${filename}`);
-            isNew ? stats.created++ : stats.updated++;
-          } else {
-            console.log(`     wrote: ${filename}`);
-          }
-        } else {
-          console.log("     unchanged");
-          stats.unchanged++;
-        }
+        writeRowFile(POSTS_DIR, "", filename, content, notionIdToFile.get(page.id), existingFiles, stats);
+        recordSkipped(report, ctx);
       } catch (err) {
-        console.error(`     [error] ${err.message}`);
-        stats.errors++;
+        rowFailure(report, "posts", meta.title, reasonForRowError(err), err);
       }
     }
-    stats.deleted += applyDeletions(POSTS_DIR, "posts", notionIdToFile, processedIds);
+    const deletion = applyDeletions(POSTS_DIR, "posts", notionIdToFile, processedIds);
+    stats.deleted += deletion.deleted;
+    report.guard = deletion.guard;
     console.log(`
    Created: ${stats.created} | Updated: ${stats.updated} | Unchanged: ${stats.unchanged} | Errors: ${stats.errors}`);
-    return { stats, navChanged: false, homeChanged: false, configChanged: false };
+    return { ...report, navChanged: false, homeChanged: false, configChanged: false };
   }
-  function buildActionResult(sections) {
-    let changed = false;
+  function buildActionResult(sections, assets = { downloaded: 0, removed: 0 }) {
+    let changed = assets.downloaded > 0 || assets.removed > 0;
     const parts = [];
     for (const { label, stats, navChanged, homeChanged, configChanged } of sections) {
       if (stats.created || stats.updated || stats.renamed || stats.deleted || navChanged || homeChanged || configChanged) {
@@ -1681,6 +2229,8 @@ ${body}
         `${stats.deleted} deleted`,
         `${stats.unchanged} unchanged`
       ];
+      if (stats.scheduled)
+        counts.push(`${stats.scheduled} scheduled`);
       if (stats.errors)
         counts.push(`${stats.errors} errors`);
       const section = `${label}: ${counts.join(", ")}`;
@@ -1691,11 +2241,27 @@ ${body}
       ].filter(Boolean);
       parts.push(dataFiles.length ? `${section} (${dataFiles.join(", ")} updated)` : section);
     }
+    if (assets.downloaded || assets.removed) {
+      parts.push(`files: ${assets.downloaded} downloaded, ${assets.removed} removed`);
+    }
     if (sections.length === 0)
       parts.push("no sections synced");
     return { changed, summary: parts.join("; ") };
   }
   var RUN_SUMMARY_SCHEMA_VERSION = 1;
+  var SUMMARY_ROWS_MAX = 20;
+  var ROW_PROBLEM_TEXT = {
+    duplicate_web_address: "Another row already uses the same web address. Give one of them a different Web address.",
+    read_failed: "Notion did not hand it over this time. It will be tried again at the next update.",
+    unexpected: "Something in it could not be converted. Try removing the most recent change.",
+    would_remove: "No longer Published in Notion."
+  };
+  var FILE_PROBLEM_TEXT = {
+    file_too_large: `A file larger than ${MAX_FILE_MB} MB was left out.`,
+    file_type_unsupported: "A file of a type websites cannot show was left out.",
+    file_unavailable: "A file could not be downloaded from Notion. It will be tried again at the next update.",
+    blocks_unsupported: "Some blocks your site cannot show (such as a linked database or a sub-page) were left out."
+  };
   function redact(text, secrets = []) {
     let safe = String(text ?? "");
     for (const secret of secrets) {
@@ -1716,10 +2282,40 @@ ${body}
       config: sections.some((s) => s.configChanged)
     };
   }
+  function cleanTitle(title) {
+    return String(title ?? "").replace(/\s+/g, " ").trim().slice(0, 200) || "Untitled";
+  }
+  function affectedRows(sections) {
+    const rows = [];
+    for (const section of sections) {
+      for (const row of section.failed ?? [])
+        rows.push(row);
+      for (const title of section.guard?.titles ?? []) {
+        rows.push({ section: section.label, title, reason_code: "would_remove" });
+      }
+    }
+    return rows.slice(0, SUMMARY_ROWS_MAX).map((row) => ({
+      section: row.section,
+      title: cleanTitle(row.title),
+      reason_code: row.reason_code,
+      reason: ROW_PROBLEM_TEXT[row.reason_code] ?? ROW_PROBLEM_TEXT.unexpected
+    }));
+  }
+  function skippedContent(sections) {
+    return sections.flatMap((section) => section.skipped ?? []).slice(0, SUMMARY_ROWS_MAX).map((row) => ({
+      section: row.section,
+      title: cleanTitle(row.title),
+      reason_code: row.reason_code,
+      reason: FILE_PROBLEM_TEXT[row.reason_code] ?? FILE_PROBLEM_TEXT.blocks_unsupported,
+      count: row.count
+    }));
+  }
   function buildRunSummary({ result, code, changed, startedAt, finishedAt, sections = [], detail, secrets }) {
     if (!Array.isArray(secrets)) {
       throw new TypeError("buildRunSummary: secrets must be an array (pass [] when none apply yet)");
     }
+    const affected = affectedRows(sections);
+    const skipped = skippedContent(sections);
     return {
       schema_version: RUN_SUMMARY_SCHEMA_VERSION,
       result,
@@ -1730,10 +2326,15 @@ ${body}
       pages: sectionCounts(sections, "pages"),
       posts: sectionCounts(sections, "posts"),
       data_files: sections.length === 0 ? null : dataFilesChanged(sections),
-      detail: redact(detail, secrets)
+      detail: redact(detail, secrets),
+      ...affected.length ? { affected } : {},
+      ...skipped.length ? { skipped } : {}
     };
   }
   var RESULT_ICON = { success: "\u2705", no_op: "\u23ED\uFE0F", failure: "\u274C" };
+  function mdText(text) {
+    return String(text).replace(/[\\`*_[\]<>|]/g, "\\$&");
+  }
   function renderStepSummaryMarkdown(summary) {
     const lines = [
       `### Notion \u2192 Jekyll sync \u2014 ${RESULT_ICON[summary.result] ?? ""} ${summary.result} (\`${summary.code}\`)`,
@@ -1756,6 +2357,18 @@ ${body}
     if (summary.data_files) {
       const updated = Object.entries({ "nav.yml": summary.data_files.nav, "home.yml": summary.data_files.home, "_config.yml": summary.data_files.config }).filter(([, changed]) => changed).map(([name]) => name);
       lines.push(`**Data files updated:** ${updated.length ? updated.join(", ") : "none"}`);
+      lines.push("");
+    }
+    if (summary.affected?.length) {
+      lines.push(summary.code === "bulk_delete_guard" ? "**Kept on the site, waiting for you to confirm:**" : "**Not published this time:**");
+      for (const row of summary.affected)
+        lines.push(`- ${mdText(row.title)} (${row.section}): ${row.reason}`);
+      lines.push("");
+    }
+    if (summary.skipped?.length) {
+      lines.push("**Published, with something left out:**");
+      for (const row of summary.skipped)
+        lines.push(`- ${mdText(row.title)} (${row.section}): ${row.reason}`);
       lines.push("");
     }
     if (summary.detail)
@@ -1801,17 +2414,19 @@ ${body}
     console.log(`Notion \u2192 Jekyll sync
 `);
     const sections = [];
+    const assets = { downloaded: 0, removed: 0 };
     if (PAGES_DB_ID) {
-      sections.push({ label: "pages", ...await syncPages() });
+      sections.push({ label: "pages", ...await syncPages(assets) });
     } else {
       console.log("Skipping pages sync (NOTION_PAGES_DATABASE_ID not set).");
     }
     if (POSTS_DB_ID) {
-      sections.push({ label: "posts", ...await syncPosts() });
+      sections.push({ label: "posts", ...await syncPosts(assets) });
     } else {
       console.log("Skipping posts sync (NOTION_POSTS_DATABASE_ID / NOTION_DATABASE_ID not set).");
     }
-    return sections;
+    assets.removed = pruneAssets();
+    return { sections, assets };
   }
   async function main() {
     const startedAt = new Date().toISOString();
@@ -1835,41 +2450,47 @@ ${body}
       return;
     }
     const secrets = [config.notionToken, config.pagesDbId, config.postsDbId].filter(Boolean);
-    let sections;
+    let sections, assets;
     try {
-      sections = await run(config);
+      ({ sections, assets } = await run(config));
     } catch (err) {
       console.error(`
 Fatal: ${err.message}`);
-      const isGuard = err instanceof GuardError;
       writeActionOutputs(buildRunSummary({
         result: "failure",
-        code: isGuard ? "bulk_delete_guard" : "sync_error",
+        code: "sync_error",
         changed: false,
         startedAt,
         finishedAt: new Date().toISOString(),
         secrets,
-        detail: isGuard ? `bulk-delete guard tripped for ${err.label}: would delete ${err.staleCount} of ${err.trackedCount} tracked (${Math.round(err.ratio * 100)}%)` : `sync failed: ${err.message}`
+        detail: `sync failed: ${err.message}`
       }));
       process.exit(1);
     }
     const totalErrors = sections.reduce((n, s) => n + s.stats.errors, 0);
+    const guarded = sections.find((s) => s.guard);
     console.log(`
 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`);
-    const { changed, summary: detail } = buildActionResult(sections);
+    const { changed, summary: counts } = buildActionResult(sections, assets);
+    const guardDetail = guarded ? `bulk-delete guard tripped for ${guarded.guard.label}: would delete ${guarded.guard.staleCount} of ${guarded.guard.trackedCount} tracked (${Math.round(guarded.guard.ratio * 100)}%); ` : "";
     writeActionOutputs(buildRunSummary({
-      result: totalErrors > 0 ? "failure" : "success",
-      code: totalErrors > 0 ? "row_errors" : "synced",
+      result: guarded || totalErrors > 0 ? "failure" : "success",
+      code: guarded ? "bulk_delete_guard" : totalErrors > 0 ? "row_errors" : "synced",
       changed,
       startedAt,
       finishedAt: new Date().toISOString(),
       sections,
-      detail,
+      detail: `${guardDetail}${counts}`,
       secrets
     }));
-    if (totalErrors > 0) {
-      console.error(`Sync finished with ${totalErrors} error(s). See above for details.`);
+    if (guarded) {
+      console.error("Sync finished, but some deletions were held back. See above for details.");
       process.exit(1);
+    }
+    if (totalErrors > 0) {
+      console.log(`::warning::${totalErrors} row(s) could not be published this time. The rest of the site was updated.`);
+      console.log(`Sync finished with ${totalErrors} row error(s). See above for details.`);
+      return;
     }
     console.log("Sync complete.");
   }
@@ -1882,7 +2503,6 @@ Fatal: ${err.message}`);
   }
   module.exports = {
     ConfigError,
-    GuardError,
     isTrue,
     resolveConfig,
     buildActionResult,
@@ -1892,10 +2512,18 @@ Fatal: ${err.message}`);
     renderStepSummaryMarkdown,
     writeActionOutputs,
     richTextToMarkdown,
+    richTextToPlain,
     blockToMarkdown,
     blocksToMarkdown,
+    protectLiquid,
+    slugify,
     titleToSlug,
+    resolveSlug,
+    normalizePageType,
     typeToLayout,
+    isFutureDate,
+    extractPageMeta,
+    extractPostMeta,
     buildPageFrontMatter,
     buildPostFrontMatter,
     postFilename

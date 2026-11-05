@@ -41,13 +41,27 @@ repository's Node engine range is replaced by `engines.bun`).
 Notion Pages DB  ─┐
                   ├─→  scripts/sync-notion.js  ─→  _data/nav.yml, _data/home.yml,
 Notion Posts DB  ─┘                             ─→  _pages/{slug}.md, _posts/{date}-{slug}.md
-                                                ─→  _config.yml (title, author.name only)
+                                                ─→  _config.yml (title, description, author.name only)
+                                                ─→  assets/notion/ (copies of files uploaded to Notion)
 ```
 
 - Only rows whose `Status` select equals **`Published`** are synced (both databases).
-- The Notion page body is converted to Markdown (paragraphs, headings, lists,
-  to-dos, code blocks with captions, quotes, callouts, dividers, images, videos,
-  bookmarks/link previews).
+- The Notion page body is converted to Markdown: paragraphs, headings, lists
+  (nested too), to-dos, code blocks with captions, quotes, callouts, dividers,
+  images, videos, files, PDFs, audio, bookmarks/link previews/embeds (as
+  links), toggles (as `<details>` with their contents), columns (flattened, in
+  reading order), tables (GFM), synced blocks and equations (as code). Nested
+  blocks are read three levels deep. Sub-pages, linked databases and anything
+  deeper are left out and counted in the run summary (`skipped_blocks`).
+- Files uploaded to Notion (photos, videos, PDFs, cover images, the profile
+  photo) are copied into `assets/notion/` and linked from there, because
+  Notion's own links expire after an hour. A copy is named after the file's
+  URL without its signature, so it is downloaded once; copies no page links
+  to any more are deleted. Files over 20 MB, file types a website can't
+  show, and URLs outside Notion's file hosts are left out and named in the
+  run summary (`skipped`). See [SECURITY.md](SECURITY.md#outbound-network-destinations).
+- Text that looks like Liquid (`{{` or `{%`) is wrapped in `{% raw %}`, so
+  writing about templates can't break the Jekyll build.
 - Writes are diffed: a file is rewritten only when its content would change.
 - Files carry a `notion_id` front-matter key; **only files with a `notion_id` are
   managed** — hand-added Markdown files in `_pages/`/`_posts/` are never deleted.
@@ -55,6 +69,12 @@ Notion Posts DB  ─┘                             ─→  _pages/{slug}.md, _p
   `{slug}.md` / `{date}-{slug}.md` is overwritten by that row's output — the
   `notion_id` check guards deletion, not name collisions.) Slug (or date) renames
   in Notion delete the old file and write the new one.
+- Two published rows that would write the same file: the row that already
+  owns it keeps it (otherwise the first row Notion returns), and the other is
+  reported as a row error (`duplicate_web_address`).
+- Posts dated in the future are left out until the first run on or after
+  that date. They count as present, so an already-published post moved to a
+  later date is kept, not deleted.
 
 ### Runtime expectations
 
@@ -108,22 +128,27 @@ are provisioned stays green instead of failing loudly. See
 These are the properties the engine reads. Each canonical name lists the
 alternate property names it also accepts (useful when duplicating an existing
 database); columns marked *default* apply when the property is empty or absent.
+Notion property names are case-sensitive. The v2 InkDrafts template uses the
+plain names in **bold**; v1 copies keep working.
+
+Every text value is read whole: a title with a bold word in the middle is
+not cut off at the formatting.
 
 ### Pages database (`NOTION_PAGES_DATABASE_ID`) — one row = one site section
 
 | Property | Type | Meaning |
 |---|---|---|
-| `Title` (or `title`, `Name`) | Title | Page name; used as nav label and page heading. Default `Untitled`. |
-| `Slug` (or `slug`) | Text | URL path segment, e.g. `about`. Defaults to the slugified title. |
-| `Type` (or `type`) | Select | `home`, `blog-list`, `blog`, or `markdown` (default) — see mapping below. Matched case-insensitively (`Home`, `Blog-List` also work). |
-| `Nav Order` (or `Nav order`, `Order`) | Number | Sort order in the header nav. Default `99`. |
-| `Show in Nav` (or `Show In Nav`, `Nav`) | Checkbox | Include in `_data/nav.yml`. Default `false`. |
-| `Status` | Select | Must be `Published` to sync (query filter). |
-| `Description` (or `Excerpt`, `Summary`) | Text | Optional meta description → page front matter. |
-| `Name` (or `Display Name`, `Author Name`) | Text | Display name on the home page (`home` type only); falls back to `Title`. Also written to `_config.yml` as `title` and `author.name`. |
-| `Profile Picture` (or `Avatar`, `Photo`) | Text | External image URL (`home` type only). **Use external URLs — Notion-hosted file URLs expire.** |
-| `Tagline` (or `Short Bio`, `Subtitle`) | Text | One-line bio (`home` type only). |
-| `Social Links` (or `Socials`, `Links`) | Text | Newline-separated `Name: URL` pairs (`home` type only). |
+| **`Title`** (whichever property has Notion's Title type) | Title | Page name; used as nav label and page heading. Default `Untitled`. |
+| `Slug` (or `slug`, **`Web address`**, `Web Address`) | Text | URL path segment, e.g. `about`. See [Web addresses](#web-addresses). |
+| **`Type`** (or `type`) | Select | `home`, `blog-list`, `blog`, or `markdown` (default) — see mapping below. Matched case-insensitively (`Home`, `Blog-List` also work). The v2 labels **`Home page`**, **`List of posts`** and **`Regular page`** mean `home`, `blog-list` and `markdown`. |
+| `Nav Order` (or `Nav order`, `Order`, **`Menu order`**, `Menu Order`) | Number | Sort order in the header nav. Default `99`. |
+| `Show in Nav` (or `Show In Nav`, `Nav`, **`Show in menu`**, `Show in Menu`) | Checkbox | Include in `_data/nav.yml`. Default `false`. |
+| **`Status`** | Select | Must be `Published` to sync (query filter). |
+| `Description` (or `Excerpt`, **`Summary`**) | Text | Optional meta description → page front matter. On the `home` row, used as the site description when `Tagline` is empty. |
+| **`Name`** (or `Display Name`, `Author Name`) | Text | Display name on the home page (`home` type only); falls back to `Title`. Also written to `_config.yml` as `title` and `author.name`. |
+| `Profile Picture` (or `Avatar`, **`Photo`**) | Files & media, or Text | `home` type only. Files & media: the first file (an upload is copied into `assets/notion/`). Text: an image URL, used as written. |
+| **`Tagline`** (or `Short Bio`, `Subtitle`) | Text | One-line bio (`home` type only). Also written to `_config.yml` as `description`, for search results and link previews. |
+| `Social Links` (or `Socials`, **`Links`**) | Text | Newline-separated `Name: URL` pairs (`home` type only). |
 
 `Social Links` format:
 
@@ -147,19 +172,34 @@ other row becomes that page's Markdown content.
 | `blog-list` or `blog` | `blog` | `/{slug}/` |
 | `markdown` (default) | `page` | `/{slug}/` |
 
+#### Web addresses
+
+A row's slug is decided in this order:
+
+1. A typed `Slug` / `Web address` that is already safe in a URL and a file
+   name (`[A-Za-z0-9][A-Za-z0-9_-]*`) is used exactly as typed. Anything else
+   is cleaned up: accents dropped, other characters turned into hyphens
+   (`Mi viaje: día 1` → `mi-viaje-dia-1`).
+2. With no typed value, the slug the row's current file already has is kept,
+   so fixing a typo in a title never breaks a shared link.
+3. Otherwise the cleaned-up title, and failing that (a title with no Latin
+   letters) `page-` plus the first 8 characters of the row id.
+
+The slug is always written quoted in front matter.
+
 ### Posts database (`NOTION_POSTS_DATABASE_ID`; legacy `NOTION_DATABASE_ID`) — one row = one blog post
 
 | Property | Type | Meaning |
 |---|---|---|
-| `Title` (or `title`, `Name`) | Title | Post title. Default `Untitled`. |
-| `Slug` (or `slug`) | Text | URL slug. Defaults to the slugified title. |
-| `Status` | Select | Must be `Published` to sync (query filter). |
-| `Publish Date` (or `Date`, `Published`) | Date | Publish date → filename and front matter. Defaults to today. |
-| `Tags` | Multi-select | Tags → post front matter. |
-| `Description` (or `Excerpt`, `Summary`) | Text | Optional excerpt → post front matter. |
-| `Cover Image` | Files & media | First file's URL. **External URLs strongly recommended — Notion-hosted file URLs expire and the link will rot.** |
-| `Canonical URL` | URL | Optional canonical link → post front matter. |
-| `Featured` | Checkbox | `featured: true` in post front matter when checked. |
+| **`Title`** (whichever property has Notion's Title type) | Title | Post title. Default `Untitled`. |
+| `Slug` (or `slug`, **`Web address`**, `Web Address`) | Text | URL slug. See [Web addresses](#web-addresses). |
+| **`Status`** | Select | Must be `Published` to sync (query filter). |
+| `Publish Date` (or **`Date`**, `Published`) | Date | Publish date → filename and front matter. Empty: the day the row was created (not today, which would move the post's address every day). A future date holds the post back until that day. |
+| **`Tags`** | Multi-select | Tags → post front matter. |
+| `Description` (or `Excerpt`, **`Summary`**) | Text | Optional excerpt → post front matter. |
+| `Cover Image` (or **`Cover image`**, `Cover`) | Files & media | First file. An upload is copied into `assets/notion/`; an external link is used as written. |
+| `Canonical URL` (or **`Originally published at`**) | URL | Optional canonical link → post front matter. |
+| **`Featured`** | Checkbox | `featured: true` in post front matter when checked. |
 
 ## Generated-file contract
 
@@ -171,27 +211,37 @@ All of these are **sync-managed**: never edited by hand, changes are overwritten
 | `_data/nav.yml` | All rows with `Show in Nav` checked | List of `{title, url}` sorted by `Nav Order`; `url` is `/` for `home`, else `/{slug}`. Empty list writes `[]`. |
 | `_pages/{slug}.md` | Each published non-`home` row | Front matter `layout`, `title`, `slug`, optional `description`, `notion_id`; body = page content. |
 | `_posts/{date}-{slug}.md` | Each published post row | Front matter `layout: post`, `title`, `date`, `slug`, optional `tags`, `excerpt`, `cover_image`, `canonical_url`, `featured`, `notion_id`; body = post content. |
-| `_config.yml` | The `Name` of the `home` row | **Only** the top-level `title:` and the `author.name:` lines are rewritten, line by line, so comments and ordering survive. `url`, `baseurl`, and everything else are never touched. Unrecognized shapes are left alone and warned about. |
+| `_config.yml` | The `Name` and `Tagline` (or `Summary`) of the `home` row | **Only** the top-level `title:`, `description:` and the `author.name:` lines are rewritten, line by line, so comments and ordering survive. With no Tagline or Summary, `description:` is left as it is (the old template default `A Notion-powered Jekyll site.` is replaced by a neutral one). `url`, `baseurl`, and everything else are never touched. Unrecognized shapes are left alone and warned about. |
+| `assets/notion/{hash}-{name}.{ext}` | Files uploaded to Notion | Copies of the files the generated pages link to, linked as `{baseurl}/assets/notion/…`. Unlinked copies are deleted at the end of each run. |
 
 ### Bulk-delete guard
 
-Unpublishing rows in Notion deletes the corresponding files — but a run that
-returns **zero published rows while tracked files exist** (every tracked file
-looks unpublished), or that would delete **more than one file while exceeding
-`MAX_DELETE_RATIO`** (default 0.5) of the tracked files, aborts with exit 1
-**before deleting anything**. A dropped `Status` option, a revoked integration
-share, or a partial API response is indistinguishable from a real mass unpublish,
-and the consumer workflow commits the sync's output straight to the site's default
-branch — so the guard aborts loudly instead.
+Unpublishing rows in Notion deletes the corresponding files — but a section
+(pages or posts) that returns **zero published rows while tracked files
+exist** (every tracked file looks unpublished), or that would delete **more
+than two files while exceeding `MAX_DELETE_RATIO`** (default 0.5) of the
+tracked files, **holds those deletions back**. A dropped `Status` option, a
+revoked integration share, or a partial API response is indistinguishable from
+a real mass unpublish, and the consumer workflow commits the sync's output
+straight to the site's default branch — so the guard keeps the files and asks.
 
-On abort the script exits 1, so the consumer's commit step never runs and **the
-repository is left untouched**. Earlier steps in the same aborted run — file
-writes, and deletions caused by slug/date renames — can remain in the working
-tree as uncommitted changes; the next successful sync reconciles them.
+The guard works per section. The held-back section still writes its other
+changes (new and edited rows), but keeps `_data/nav.yml`, `_data/home.yml`
+and `_config.yml` as they were, since that read is not trusted. The other
+section syncs normally. The run reports `code: "bulk_delete_guard"`, lists
+the rows that would go in `affected` (by title), sets `changed` for whatever
+was written, and exits 1. A consumer workflow that commits when
+`changed == 'true'` and the job was not cancelled (see the example below)
+keeps every other change of the run.
 
-A single deletion is allowed — unless the run returned zero published rows, which
-trips the guard however few files are stale. Push a genuine mass unpublish through
-with `ALLOW_BULK_DELETE=true`.
+Always allowed:
+
+- Removing only the template's example post (web address
+  `welcome-to-inkdrafts`), even though that leaves zero published posts.
+- One or two deletions, as long as Notion returned at least one published
+  row in that section.
+
+Push a genuine mass unpublish through with `ALLOW_BULK_DELETE=true`.
 
 ### Clean no-op on missing credentials
 
@@ -208,11 +258,15 @@ what's missing.
 
 ### Exit codes
 
-`0` — clean sync (possibly all-unchanged), or a no-op skip when Notion
-credentials aren't configured yet (above). `1` — a database query failed, any
-per-row error occurred, or the bulk-delete guard tripped. The caller (the
-site's workflow) decides what to commit. Every one of these outcomes emits a
-run summary (above) — a non-zero exit never means the outputs are empty.
+`0` — clean sync (possibly all-unchanged), a no-op skip when Notion
+credentials aren't configured yet (above), or a sync where some rows could
+not be published (`row_errors`: the rest of the site still updates, the run
+logs a `::warning::`, and the rows are named in the run summary's
+`affected`). `1` — a database query failed (`sync_error`, `changed` is
+false) or the bulk-delete guard held deletions back (`bulk_delete_guard`,
+`changed` reflects the rest of the run). The caller (the site's workflow)
+decides what to commit. Every one of these outcomes emits a run summary
+(above) — a non-zero exit never means the outputs are empty.
 
 ## Usage as a GitHub Action
 
@@ -247,11 +301,15 @@ jobs:
           pages_database_id: ${{ secrets.NOTION_PAGES_DATABASE_ID }}
           posts_database_id: ${{ secrets.NOTION_POSTS_DATABASE_ID }}
       - name: Commit synced content
-        if: steps.sync.outputs.changed == 'true'
+        # !cancelled(): a run whose deletions were held back exits 1, but its
+        # other changes are real and must still be committed.
+        if: ${{ !cancelled() && steps.sync.outputs.changed == 'true' }}
         run: |
           git config user.name  "notiongit-sync"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A _pages _posts _data _config.yml
+          for path in _pages _posts _data _config.yml assets/notion; do
+            if [ -e "$path" ]; then git add -A -- "$path"; fi
+          done
           git commit -m "chore: sync from Notion" || exit 0
           git push
 ```

@@ -36,19 +36,25 @@ applied to this JSON shape instead of the generated-file contract.
 | `schema_version` | integer | Always `1` for every payload this document describes. |
 | `result` | `"success" \| "no_op" \| "failure"` | Coarse, stable outcome. Safe to switch on without knowing every `code`. |
 | `code` | string | Specific, machine-readable reason — see the table below. New codes may be added within `schema_version` 1 without a version bump; treat an unrecognized code as a generic instance of its `result`. |
-| `changed` | boolean | `true` when any tracked file was created, updated, renamed or deleted this run — same meaning as the `changed` output. Independent of `result`: a `row_errors` failure can still report `changed: true` if some rows succeeded before another row failed. Always `false` for `no_op` and every other failure code, where nothing was ever written. |
+| `changed` | boolean | `true` when any tracked file (including copies under `assets/notion/`) was created, updated, renamed or deleted this run — same meaning as the `changed` output. Independent of `result`: a `row_errors` or `bulk_delete_guard` failure reports `changed: true` when the rest of the run wrote files, and the calling workflow commits them. Always `false` for `no_op` and `sync_error`. |
 | `started_at` | string (ISO 8601, UTC) | When the run began, before any Notion API call. |
 | `finished_at` | string (ISO 8601, UTC) | When the run reached its terminal state. |
 | `pages` | object or `null` | Counts for the pages database — see below. `null` when the pages section didn't run this time (not configured, or the run aborted before finishing it). |
 | `posts` | object or `null` | Counts for the posts database — same shape and fallback as `pages`. |
 | `data_files` | object or `null` | Which of `_data/nav.yml`, `_data/home.yml`, and the managed `_config.yml` lines were rewritten. `null` only when no section ran at all; see below. |
-| `detail` | string | One safe, human-readable line: counts and generated filenames only. |
+| `detail` | string | One safe, human-readable line: counts only, never titles or filenames. |
+| `affected` | array, optional | Present only when non-empty. The rows the site owner needs to look at — see [Rows named in the summary](#rows-named-in-the-summary). |
+| `skipped` | array, optional | Present only when non-empty. Published rows that went live with something left out. |
 
 `pages` / `posts`, when not `null`, are:
 
 ```json
-{ "created": 0, "updated": 0, "renamed": 0, "deleted": 0, "unchanged": 0, "errors": 0 }
+{ "created": 0, "updated": 0, "renamed": 0, "deleted": 0, "unchanged": 0, "errors": 0, "scheduled": 0, "skipped_blocks": 0 }
 ```
+
+`scheduled` (posts held back because their date is still ahead) and
+`skipped_blocks` (blocks left out because the site can't show them) were
+added in 2.1.0 and are optional: older summaries don't carry them.
 
 `data_files`, when not `null`, is:
 
@@ -68,11 +74,13 @@ necessarily go `null` together:
   real, meaningful values (posts never touches `_data/`, so `data_files` on
   a posts-only run is correctly `{"nav":false,"home":false,"config":false}`,
   not `null`).
-- **The run aborted before finishing any section** — the bulk-delete guard
-  tripping (`bulk_delete_guard`), an unexpected error (`sync_error`), or
-  never getting past credential resolution (`missing_credentials`). Here
-  there genuinely are no counts for *any* section, so `pages`, `posts` and
-  `data_files` are all `null` together, and `code`/`detail` explain why.
+- **The run aborted before finishing any section** — an unexpected error
+  (`sync_error`), or never getting past credential resolution
+  (`missing_credentials`). Here there genuinely are no counts for *any*
+  section, so `pages`, `posts` and `data_files` are all `null` together, and
+  `code`/`detail` explain why. (Before 2.1.0 a `bulk_delete_guard` run also
+  aborted and reported all three as `null`; since 2.1.0 every section runs
+  to the end and reports real counts.)
 
 Either way, `null` is a documented fallback, not a missing value — never
 guess at, or report stale, counts.
@@ -83,9 +91,40 @@ guess at, or report stale, counts.
 |---|---|---|
 | `synced` | `success` | The run completed. `changed` and the per-section counts say whether anything actually moved — an all-`unchanged` run is still `"synced"`. |
 | `missing_credentials` | `no_op` | `NOTION_TOKEN` and/or a database ID were absent or blank. Nothing was read from Notion or written to the site; this is not an error (see [Clean no-op on missing credentials](../README.md#clean-no-op-on-missing-credentials)). |
-| `bulk_delete_guard` | `failure` | The [suspicious-bulk-delete guard](../README.md#bulk-delete-guard) aborted the run before deleting anything. |
+| `bulk_delete_guard` | `failure` | The [suspicious-bulk-delete guard](../README.md#bulk-delete-guard) held deletions back in at least one section. Everything else in the run went through, and `changed` says whether it wrote anything. `detail` starts with `bulk-delete guard tripped for {pages\|posts}: would delete N of M tracked (P%)`; `affected` names the rows (`reason_code: "would_remove"`). The engine exits 1. |
 | `sync_error` | `failure` | The run aborted on an unexpected error before finishing a section — most commonly a failed Notion API call (auth, network, a database the integration can't see), but this also covers non-Notion failures (e.g. an unwritable site checkout). `detail` carries the redacted error message. |
-| `row_errors` | `failure` | The run completed, but one or more individual rows could not be processed — see `pages.errors` / `posts.errors` for counts. `changed` can still be `true` here. |
+| `row_errors` | `failure` | The run completed, but one or more individual rows could not be published — see `pages.errors` / `posts.errors` for counts and `affected` for the rows. Everything else went through and `changed` can be `true`. Since 2.1.0 the engine exits 0 here, so the site keeps updating while one row waits for a fix. |
+
+## Rows named in the summary
+
+`affected` and `skipped` hold up to 20 entries each:
+
+```json
+{ "section": "posts", "title": "Mi viaje: día 1", "reason_code": "duplicate_web_address", "reason": "Another row already uses the same web address. Give one of them a different Web address." }
+```
+
+`skipped` entries also carry `count`, how many files or blocks of that kind
+were left out of the row.
+
+| `reason_code` | List | Meaning |
+|---|---|---|
+| `duplicate_web_address` | `affected` | Another published row already writes the same file. The row that already owned it (or the first one Notion returned) is kept. |
+| `read_failed` | `affected` | Notion returned an error while the row's body was read. Retried at the next run. |
+| `unexpected` | `affected` | The row could not be converted for another reason. |
+| `would_remove` | `affected` | `bulk_delete_guard` only: this row is no longer Published, and its removal is waiting for confirmation. |
+| `file_too_large` | `skipped` | A file uploaded to Notion is over 20 MB. |
+| `file_type_unsupported` | `skipped` | A file of a type the site can't show (not a common photo, video, audio or document type). |
+| `file_unavailable` | `skipped` | A file could not be downloaded from Notion's file hosts, or it pointed somewhere else. Retried at the next run. |
+| `blocks_unsupported` | `skipped` | Blocks the site can't show: sub-pages, linked databases, or content nested more than three levels deep. |
+
+`reason` is a plain English sentence for the code, used on the Actions run
+page. A dashboard should show its own wording, keyed by `reason_code`, and
+fall back to `reason` for a code it doesn't know. New codes may be added
+within `schema_version` 1.
+
+Titles appear only in these two lists, never in `detail`. They are titles of
+rows that are, or were, Published (so already public on the site); the
+engine never reads Draft rows.
 
 ## Non-secret guarantee
 
@@ -119,10 +158,16 @@ database ID.
 {"schema_version":1,"result":"no_op","code":"missing_credentials","changed":false,"started_at":"2026-09-02T12:00:00.000Z","finished_at":"2026-09-02T12:00:00.000Z","pages":null,"posts":null,"data_files":null,"detail":"skipped: NOTION_TOKEN environment variable is not set."}
 ```
 
-**`failure`, bulk-delete guard tripped:**
+**`failure`, bulk-delete guard held posts deletions back (a new page still went through):**
 
 ```json
-{"schema_version":1,"result":"failure","code":"bulk_delete_guard","changed":false,"started_at":"2026-09-02T12:00:00.000Z","finished_at":"2026-09-02T12:00:02.000Z","pages":null,"posts":null,"data_files":null,"detail":"bulk-delete guard tripped for pages: would delete 3 of 4 tracked (75%)"}
+{"schema_version":1,"result":"failure","code":"bulk_delete_guard","changed":true,"started_at":"2026-09-02T12:00:00.000Z","finished_at":"2026-09-02T12:00:02.000Z","pages":{"created":1,"updated":0,"renamed":0,"deleted":0,"unchanged":2,"errors":0,"scheduled":0,"skipped_blocks":0},"posts":{"created":0,"updated":0,"renamed":0,"deleted":0,"unchanged":1,"errors":0,"scheduled":0,"skipped_blocks":0},"data_files":{"nav":true,"home":false,"config":false},"detail":"bulk-delete guard tripped for posts: would delete 3 of 4 tracked (75%); pages: 1 created, 0 updated, 0 renamed, 0 deleted, 2 unchanged (nav.yml updated); posts: 0 created, 0 updated, 0 renamed, 0 deleted, 1 unchanged","affected":[{"section":"posts","title":"Spring","reason_code":"would_remove","reason":"No longer Published in Notion."},{"section":"posts","title":"Summer","reason_code":"would_remove","reason":"No longer Published in Notion."},{"section":"posts","title":"Autumn","reason_code":"would_remove","reason":"No longer Published in Notion."}]}
+```
+
+**`failure`, one row could not be published (exit 0; the rest of the site updated):**
+
+```json
+{"schema_version":1,"result":"failure","code":"row_errors","changed":true,"started_at":"2026-09-02T12:00:00.000Z","finished_at":"2026-09-02T12:00:02.000Z","pages":null,"posts":{"created":1,"updated":0,"renamed":0,"deleted":0,"unchanged":4,"errors":1,"scheduled":0,"skipped_blocks":0},"data_files":{"nav":false,"home":false,"config":false},"detail":"posts: 1 created, 0 updated, 0 renamed, 0 deleted, 4 unchanged, 1 errors","affected":[{"section":"posts","title":"Mi viaje: día 1","reason_code":"duplicate_web_address","reason":"Another row already uses the same web address. Give one of them a different Web address."}]}
 ```
 
 **`failure`, an unexpected sync error (most commonly a failed Notion API call):**

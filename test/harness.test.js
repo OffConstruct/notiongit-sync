@@ -20,6 +20,7 @@ import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const { schema, validateAgainstSchema } = require('./support/run-summary-validator.js');
+const yaml = require('js-yaml');
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..');
 const TOKEN = 'secret-test-token-never-print-me';
@@ -91,6 +92,8 @@ const postRow = () =>
 const state = {
   pages: [],
   posts: [],
+  files: {},
+  fileFetches: [],
   blocks: {
     [HOME_ID]:  [paragraph('Home bio paragraph.')],
     [ABOUT_ID]: [paragraph('About body paragraph.')],
@@ -172,6 +175,16 @@ beforeAll(() => {
         const items = state.blocks[blockChildren[1]] ?? [];
         const page  = paginate(items, url.searchParams.get('start_cursor'));
         return Response.json({ object: 'list', ...page });
+      }
+
+      // Notion-hosted files. Every block read signs the URL afresh (a new
+      // query string each time), the way Notion's S3 links behave.
+      const file = url.pathname.match(/^\/files\/(.+)$/);
+      if (file && req.method === 'GET') {
+        const served = state.files[decodeURIComponent(file[1])];
+        if (!served) return new Response('missing', { status: 404 });
+        state.fileFetches.push(file[1]);
+        return new Response(served.body, { headers: { 'content-type': served.type } });
       }
 
       return new Response('harness: not found', { status: 404 });
@@ -346,7 +359,7 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     // Pages: about.md with front matter, body and notion_id.
     const about = readFileSync(path.join(site, '_pages', 'about.md'), 'utf8');
     expect(about).toContain('title: "About"');
-    expect(about).toContain('slug: about');
+    expect(about).toContain('slug: "about"');
     expect(about).toContain(`notion_id: "${ABOUT_ID}"`);
     expect(about).toContain('About body paragraph.');
 
@@ -422,7 +435,7 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     expect(readRunSummaryArtifact(summaryFile, 'synced')).toEqual(JSON.parse(outputs.summary));
   });
 
-  it('bulk-delete guard aborts on zero published rows, deletes nothing, but still emits a failure run summary', async () => {
+  it('bulk-delete guard holds back deletions on zero published rows, deletes nothing, and still emits a failure run summary', async () => {
     state.pages = []; // "misread": every tracked page looks unpublished
     const aboutPath = path.join(site, '_pages', 'about-renamed.md');
     const before = readFileSync(aboutPath, 'utf8');
@@ -431,24 +444,28 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
 
     const result = await runEngine({ ...env, GITHUB_OUTPUT: guardOutFile, GITHUB_STEP_SUMMARY: stepSummaryFile });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('ABORT');
-    expect(result.stderr).toContain('bulk-delete guard');
+    expect(result.stderr).toContain('HELD BACK');
+    const navBefore = readFileSync(path.join(site, '_data', 'nav.yml'), 'utf8');
     expect(readFileSync(aboutPath, 'utf8')).toBe(before); // untouched
+    // An untrusted read keeps the menu as it was, too.
+    expect(navBefore).toContain('url: "/about-renamed"');
 
-    // The run didn't finish a section, so pages/posts/data_files are the
-    // documented null fallback — but every terminal path still emits a
-    // parseable summary, not empty output.
+    // Both sections ran to the end, so their counts are real; nothing
+    // changed because the only change on offer was the held-back deletion.
     const outputs = parseGithubOutput(readFileSync(guardOutFile, 'utf8'));
     expect(outputs.changed).toBe('false');
     const summary = JSON.parse(outputs.summary);
     expect(summary.schema_version).toBe(1);
     expect(summary.result).toBe('failure');
     expect(summary.code).toBe('bulk_delete_guard');
-    expect(summary.pages).toBeNull();
-    expect(summary.posts).toBeNull();
-    expect(summary.data_files).toBeNull();
+    expect(summary.pages.deleted).toBe(0);
+    expect(summary.posts).not.toBeNull();
     expect(summary.detail).not.toContain('about-renamed'); // no filenames — counts only
-    expect(summary.detail).toContain('pages');
+    expect(summary.detail).toMatch(/for pages: would delete 1 of 1/);
+    // The owner's dashboard names what would go.
+    expect(summary.affected).toEqual([
+      { section: 'pages', title: 'About', reason_code: 'would_remove', reason: expect.any(String) },
+    ]);
 
     const stepSummary = readFileSync(stepSummaryFile, 'utf8');
     expect(stepSummary).toContain('bulk_delete_guard');
@@ -491,8 +508,7 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     const result = await runEngine({ ...seedEnv, GITHUB_OUTPUT: ratioOutFile });
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('ABORT');
-    expect(result.stderr).toContain('bulk-delete guard');
+    expect(result.stderr).toContain('HELD BACK');
     expect(result.stderr).toContain('75%');
     for (const { slug } of extraPages) {
       expect(existsSync(path.join(ratioSite, '_pages', `${slug}.md`))).toBe(true); // untouched
@@ -545,7 +561,7 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     expect(readRunSummaryArtifact(failEnv.RUN_SUMMARY_FILE, 'sync_error')).toEqual(summary);
   });
 
-  it('a single failing row reports code=row_errors while the rest of the sync lands', async () => {
+  it('a single failing row reports code=row_errors, names the row, and exits 0 so the rest of the sync is committed', async () => {
     const rowErrorSite = makeSite();
 
     const erroringRow = row(ERRORING_PAGE_ID, {
@@ -557,7 +573,8 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
 
     const { result, outputs, summaryFile } = await outputsOf(baseEnv(rowErrorSite), makeOutputFile());
 
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('::warning::');
     expect(outputs.changed).toBe('true');
     const summary = readRunSummaryArtifact(summaryFile, 'row_errors');
     expect(summary.result).toBe('failure');
@@ -569,6 +586,10 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     expect(existsSync(path.join(rowErrorSite, '_pages', 'erroring.md'))).toBe(false);
     // detail carries counts only — never the failed row's id or error text.
     expect(outputs.summary).not.toContain(ERRORING_PAGE_ID);
+    expect(summary.detail).not.toContain('Erroring');
+    expect(summary.affected).toEqual([
+      { section: 'pages', title: 'Erroring', reason_code: 'read_failed', reason: expect.any(String) },
+    ]);
     expect(summary).toEqual(JSON.parse(outputs.summary));
 
     state.pages = [homeRow(), aboutRow()]; // restore shared fixture state
@@ -651,5 +672,311 @@ describe('local Action harness (fake Notion API + engine subprocess)', () => {
     expect(result.stdout).toContain('changed: true');
     expect(existsSync(path.join(localSite, '_pages', 'about.md'))).toBe(true);
     readRunSummaryArtifact(localEnv.RUN_SUMMARY_FILE, 'synced');
+  });
+});
+
+// ─── Owner mistakes and everyday Notion use (v2.1.0) ──────────────────────────
+//
+// Each scenario builds its own site, so they can be read on their own. The
+// fixtures use the v2 template's column names unless a test says otherwise.
+
+describe('everyday Notion use never freezes the site', () => {
+  const v2Title  = (...parts) => ({ type: 'title', title: parts.map((plain_text) => ({ plain_text, annotations: {} })) });
+  const v2Text   = (t) => ({ type: 'rich_text', rich_text: t ? [{ plain_text: t }] : [] });
+  const block    = (id, type, data, extra = {}) => ({ id, object: 'block', type, [type]: data, has_children: false, ...extra });
+  const textBlock = (id, t) => block(id, 'paragraph', { rich_text: [{ plain_text: t, annotations: {}, href: null }] });
+  const fileUrl  = (key) => `http://127.0.0.1:${server.port}/files/${key}?X-Amz-Signature=${Math.random().toString(16).slice(2)}`;
+
+  const SAMPLE_ID  = 'a1a1a1a1-0000-4000-8000-000000000001';
+  const OWN_ID     = 'a1a1a1a1-0000-4000-8000-000000000002';
+  const V2_HOME_ID = 'b2b2b2b2-0000-4000-8000-000000000001';
+  const V2_PAGE_ID = 'b2b2b2b2-0000-4000-8000-000000000002';
+  const PHOTO_POST = 'c3c3c3c3-0000-4000-8000-000000000001';
+  const TOGGLE_ID  = 'c3c3c3c3-0000-4000-8000-0000000000aa';
+
+  const v2Post = (id, title, { slug = '', date = '2026-01-20', extra = {} } = {}) => row(id, {
+    Title: v2Title(title),
+    Status: { type: 'select', select: { name: 'Published' } },
+    'Web address': v2Text(slug),
+    Date: { type: 'date', date: date ? { start: date } : null },
+    Tags: { type: 'multi_select', multi_select: [] },
+    ...extra,
+  });
+
+  // Pages-only and posts-only runs keep each scenario to the section it is about.
+  const postsOnly = (site, overrides = {}) => baseEnv(site, { NOTION_PAGES_DATABASE_ID: '', ...overrides });
+
+  afterAll(() => {
+    resetFixtures();
+    state.files = {};
+  });
+
+  it('removing the example post goes through, even though it leaves no published posts', async () => {
+    const site = makeSite();
+    state.posts = [v2Post(SAMPLE_ID, 'Welcome to your new website', { slug: 'welcome-to-inkdrafts' })];
+    state.blocks[SAMPLE_ID] = [textBlock('d0000000-0000-4000-8000-000000000001', 'Sample body.')];
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+    const samplePath = path.join(site, '_posts', '2026-01-20-welcome-to-inkdrafts.md');
+    expect(existsSync(samplePath)).toBe(true);
+
+    state.posts = [];
+    const { result, outputs, summaryFile } = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(samplePath)).toBe(false);
+    expect(outputs.changed).toBe('true');
+    expect(readRunSummaryArtifact(summaryFile, 'synced').posts.deleted).toBe(1);
+  });
+
+  it('a guard in one section still lets the other section publish', async () => {
+    const site = makeSite();
+    state.pages = [homeRow(), aboutRow()];
+    state.posts = [];
+    expect((await runEngine(baseEnv(site))).exitCode).toBe(0);
+
+    // Pages misread (zero rows), while a new post is written the same run.
+    state.pages = [];
+    state.posts = [v2Post(OWN_ID, 'A new post')];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'New words.')];
+    const { result, outputs, summaryFile } = await outputsOf(baseEnv(site), makeOutputFile());
+
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(path.join(site, '_pages', 'about.md'))).toBe(true);
+    expect(existsSync(path.join(site, '_posts', '2026-01-20-a-new-post.md'))).toBe(true);
+    // changed=true is what lets the workflow commit the new post.
+    expect(outputs.changed).toBe('true');
+    const summary = readRunSummaryArtifact(summaryFile, 'bulk_delete_guard');
+    expect(summary.posts.created).toBe(1);
+    expect(summary.affected.map((r) => r.title)).toEqual(['About']);
+    resetFixtures();
+  });
+
+  it('two rows with the same web address: the first is published, the second is named in the summary', async () => {
+    const site = makeSite();
+    const second = 'a1a1a1a1-0000-4000-8000-000000000003';
+    state.posts = [
+      v2Post(OWN_ID, 'Mi viaje', { slug: 'mi-viaje' }),
+      v2Post(second, 'Mi viaje: día 1', { slug: 'mi-viaje' }),
+    ];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'One.')];
+    state.blocks[second] = [textBlock('d0000000-0000-4000-8000-000000000003', 'Two.')];
+
+    const { result, summaryFile } = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(path.join(site, '_posts', '2026-01-20-mi-viaje.md'), 'utf8')).toContain('One.');
+    const summary = readRunSummaryArtifact(summaryFile, 'row_errors');
+    expect(summary.affected).toEqual([
+      { section: 'posts', title: 'Mi viaje: día 1', reason_code: 'duplicate_web_address', reason: expect.any(String) },
+    ]);
+  });
+
+  it('an accented web address with a colon, and a formatted title, come out as valid front matter', async () => {
+    const site = makeSite();
+    state.posts = [row(OWN_ID, {
+      Title: v2Title('Mi ', 'gran', ' viaje: "día" 1'),
+      Status: { select: { name: 'Published' } },
+      'Web address': v2Text('Mi viaje: día 1'),
+      Date: { date: { start: '2026-01-20' } },
+    })];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'Body.')];
+
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+    const text = readFileSync(path.join(site, '_posts', '2026-01-20-mi-viaje-dia-1.md'), 'utf8');
+    const front = yaml.load(text.split('---')[1]);
+    expect(front.title).toBe('Mi gran viaje: "día" 1');
+    expect(front.slug).toBe('mi-viaje-dia-1');
+  });
+
+  it('fixing a typo in a title keeps the post at the same web address', async () => {
+    const site = makeSite();
+    state.posts = [v2Post(OWN_ID, 'My tirp to Lisbon')];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'Body.')];
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+
+    state.posts = [v2Post(OWN_ID, 'My trip to Lisbon')];
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+    const file = path.join(site, '_posts', '2026-01-20-my-tirp-to-lisbon.md');
+    expect(readFileSync(file, 'utf8')).toContain('title: "My trip to Lisbon"');
+  });
+
+  it('a photo dragged into Notion is copied into the site once, and a fresh signature is not a change', async () => {
+    const site = makeSite();
+    state.files = {
+      'ws/f1/Beach Day.JPG': { body: new Uint8Array([0xff, 0xd8, 0xff, 1, 2, 3]), type: 'image/jpeg' },
+      'ws/f2/cover.png':     { body: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), type: 'image/png' },
+    };
+    state.fileFetches = [];
+    const photoBlock = () => block('e0000000-0000-4000-8000-000000000001', 'image', {
+      type: 'file', file: { url: fileUrl('ws/f1/Beach%20Day.JPG') }, caption: [{ plain_text: 'The beach' }],
+    });
+    const photoPost = () => v2Post(PHOTO_POST, 'Summer', {
+      extra: { 'Cover image': { type: 'files', files: [{ name: 'cover.png', type: 'file', file: { url: fileUrl('ws/f2/cover.png') } }] } },
+    });
+    state.posts = [photoPost()];
+    state.blocks[PHOTO_POST] = [photoBlock()];
+
+    let run = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(run.result.exitCode).toBe(0);
+    const post = readFileSync(path.join(site, '_posts', '2026-01-20-summer.md'), 'utf8');
+    const photo = post.match(/!\[The beach\]\((\/assets\/notion\/[^)]+)\)/)?.[1];
+    expect(photo).toMatch(/^\/assets\/notion\/[0-9a-f]{12}-beach-day\.jpg$/);
+    expect(post).not.toContain('X-Amz-Signature');
+    const cover = post.match(/^cover_image: "([^"]+)"/m)?.[1];
+    expect(cover).toMatch(/^\/assets\/notion\/[0-9a-f]{12}-cover\.png$/);
+    expect(readFileSync(path.join(site, photo))).toEqual(Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]));
+    expect(state.fileFetches.length).toBe(2);
+
+    // Next run: Notion signs both URLs again. Nothing to download or commit.
+    state.posts = [photoPost()];
+    state.blocks[PHOTO_POST] = [photoBlock()];
+    run = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(run.result.exitCode).toBe(0);
+    expect(run.outputs.changed).toBe('false');
+    expect(state.fileFetches.length).toBe(2);
+
+    // The photo is removed from the post: its copy goes too, the cover stays.
+    state.blocks[PHOTO_POST] = [textBlock('d0000000-0000-4000-8000-000000000009', 'No photo now.')];
+    run = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(run.outputs.changed).toBe('true');
+    expect(existsSync(path.join(site, photo))).toBe(false);
+    expect(existsSync(path.join(site, cover))).toBe(true);
+  });
+
+  it('a photo over the size cap, or from a host that is not Notion, is left out and named — the post still publishes', async () => {
+    const site = makeSite();
+    state.files = { 'ws/big/huge.jpg': { body: new Uint8Array(21 * 1024 * 1024), type: 'image/jpeg' } };
+    state.posts = [v2Post(PHOTO_POST, 'Big photo day')];
+    state.blocks[PHOTO_POST] = [
+      textBlock('d0000000-0000-4000-8000-000000000001', 'Words stay.'),
+      block('e0000000-0000-4000-8000-000000000002', 'image', { type: 'file', file: { url: fileUrl('ws/big/huge.jpg') }, caption: [] }),
+      block('e0000000-0000-4000-8000-000000000003', 'image', { type: 'file', file: { url: 'https://attacker.example/x.jpg' }, caption: [] }),
+    ];
+
+    const { result, summaryFile } = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(result.exitCode).toBe(0);
+    const post = readFileSync(path.join(site, '_posts', '2026-01-20-big-photo-day.md'), 'utf8');
+    expect(post).toContain('Words stay.');
+    expect(post).not.toContain('![');
+    expect(existsSync(path.join(site, 'assets', 'notion'))).toBe(false);
+    const summary = readRunSummaryArtifact(summaryFile, 'synced');
+    expect(summary.skipped.map((r) => [r.title, r.reason_code])).toEqual([
+      ['Big photo day', 'file_too_large'],
+      ['Big photo day', 'file_unavailable'],
+    ]);
+    state.files = {};
+  });
+
+  it('toggles and nested lists publish with their contents; unsupported or unreadable blocks are counted, not fatal', async () => {
+    const site = makeSite();
+    state.posts = [v2Post(OWN_ID, 'Nested')];
+    state.blocks[OWN_ID] = [
+      block(TOGGLE_ID, 'toggle', { rich_text: [{ plain_text: 'Opening hours', annotations: {} }] }, { has_children: true }),
+      block('e0000000-0000-4000-8000-000000000010', 'child_database', { title: 'Linked list' }),
+      // A synced copy whose original lives on a page the connection can't read.
+      block('e0000000-0000-4000-8000-000000000012', 'synced_block', { synced_from: { block_id: ERRORING_PAGE_ID } }),
+    ];
+    state.blocks[TOGGLE_ID] = [
+      block('e0000000-0000-4000-8000-000000000011', 'bulleted_list_item', { rich_text: [{ plain_text: 'Mon to Fri', annotations: {} }] }),
+    ];
+
+    const { result, summaryFile } = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(result.exitCode).toBe(0);
+    const post = readFileSync(path.join(site, '_posts', '2026-01-20-nested.md'), 'utf8');
+    expect(post).toContain('<details markdown="1">\n<summary>Opening hours</summary>\n\n- Mon to Fri\n\n</details>');
+    const summary = readRunSummaryArtifact(summaryFile, 'synced');
+    expect(summary.posts.skipped_blocks).toBe(2);
+    expect(summary.skipped).toEqual([
+      { section: 'posts', title: 'Nested', reason_code: 'blocks_unsupported', reason: expect.any(String), count: 2 },
+    ]);
+  });
+
+  it('a post dated in the future waits, and is neither deleted nor counted toward the guard', async () => {
+    const site = makeSite();
+    state.posts = [v2Post(OWN_ID, 'Already live')];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'Live.')];
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+    const live = path.join(site, '_posts', '2026-01-20-already-live.md');
+
+    // The only post moves to next year, and a new one is scheduled.
+    const later = `${new Date().getUTCFullYear() + 1}-06-01`;
+    const next = 'a1a1a1a1-0000-4000-8000-000000000004';
+    state.posts = [v2Post(OWN_ID, 'Already live', { date: later }), v2Post(next, 'Coming soon', { date: later })];
+    const { result, summaryFile } = await outputsOf(postsOnly(site), makeOutputFile());
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(live)).toBe(true);
+    expect(existsSync(path.join(site, '_posts', `${later}-coming-soon.md`))).toBe(false);
+    expect(readRunSummaryArtifact(summaryFile, 'synced').posts.scheduled).toBe(2);
+  });
+
+  it('Liquid-looking text in a post cannot break the site build', async () => {
+    const site = makeSite();
+    state.posts = [v2Post(OWN_ID, 'Templates')];
+    state.blocks[OWN_ID] = [textBlock('d0000000-0000-4000-8000-000000000002', 'Write {{ name }} and {% if %} literally.')];
+    expect((await runEngine(postsOnly(site))).exitCode).toBe(0);
+    const body = readFileSync(path.join(site, '_posts', '2026-01-20-templates.md'), 'utf8');
+    expect(body).toContain('{% raw %}\nWrite {{ name }} and {% if %} literally.\n{% endraw %}');
+  });
+
+  it('a v2 template copy (friendly names, uploaded profile photo) syncs end to end', async () => {
+    const site = makeSite();
+    state.files = { 'ws/me/me.webp': { body: new Uint8Array([1, 2, 3, 4]), type: 'image/webp' } };
+    state.pages = [
+      row(V2_HOME_ID, {
+        Title: v2Title('Home'),
+        Status: { select: { name: 'Published' } },
+        Type: { select: { name: 'Home page' } },
+        'Show in menu': { checkbox: false },
+        'Menu order': { number: 0 },
+        Name: v2Text('Ana Silva'),
+        Tagline: v2Text('Potter in Porto'),
+        Photo: { type: 'files', files: [{ name: 'me.webp', type: 'file', file: { url: fileUrl('ws/me/me.webp') } }] },
+        Links: v2Text('Email: mailto:ana@example.com'),
+      }),
+      row(V2_PAGE_ID, {
+        Title: v2Title('Writing'),
+        Status: { select: { name: 'Published' } },
+        Type: { select: { name: 'List of posts' } },
+        'Show in menu': { checkbox: true },
+        'Menu order': { number: 20 },
+        'Web address': v2Text('blog'),
+      }),
+    ];
+    state.blocks[V2_HOME_ID] = [textBlock('d0000000-0000-4000-8000-000000000005', 'I make bowls.')];
+    state.blocks[V2_PAGE_ID] = [];
+
+    const env = baseEnv(site, { NOTION_POSTS_DATABASE_ID: '' });
+    expect((await runEngine(env)).exitCode).toBe(0);
+    const home = yaml.load(readFileSync(path.join(site, '_data', 'home.yml'), 'utf8'));
+    expect(home.name).toBe('Ana Silva');
+    expect(home.profile_picture).toMatch(/^\/assets\/notion\/[0-9a-f]{12}-me\.webp$/);
+    expect(home.bio).toContain('I make bowls.');
+    expect(readFileSync(path.join(site, '_pages', 'blog.md'), 'utf8')).toContain('layout: blog');
+    expect(yaml.load(readFileSync(path.join(site, '_data', 'nav.yml'), 'utf8'))).toEqual([{ title: 'Writing', url: '/blog' }]);
+    const config = readFileSync(path.join(site, '_config.yml'), 'utf8');
+    expect(config).toContain('title: "Ana Silva"');
+    state.files = {};
+    resetFixtures();
+  });
+
+  it('the home Tagline becomes the site description; a project site links copies under its baseurl', async () => {
+    const site = makeSite();
+    writeFileSync(path.join(site, '_config.yml'),
+      'title: "My website"\ndescription: "A Notion-powered Jekyll site."\nbaseurl: "/my-site"\nauthor:\n  name: ""\n');
+    state.files = { 'ws/me/me.png': { body: new Uint8Array([1]), type: 'image/png' } };
+    state.pages = [row(V2_HOME_ID, {
+      Title: v2Title('Home'),
+      Type: { select: { name: 'home' } },
+      Name: v2Text('Kofi'),
+      Tagline: v2Text('Photos from Accra'),
+      Photo: { type: 'files', files: [{ name: 'me.png', type: 'file', file: { url: fileUrl('ws/me/me.png') } }] },
+    })];
+    state.blocks[V2_HOME_ID] = [];
+
+    expect((await runEngine(baseEnv(site, { NOTION_POSTS_DATABASE_ID: '' }))).exitCode).toBe(0);
+    const config = readFileSync(path.join(site, '_config.yml'), 'utf8');
+    expect(config).toContain('description: "Photos from Accra"');
+    expect(yaml.load(readFileSync(path.join(site, '_data', 'home.yml'), 'utf8')).profile_picture)
+      .toMatch(/^\/my-site\/assets\/notion\//);
+    state.files = {};
+    resetFixtures();
   });
 });
