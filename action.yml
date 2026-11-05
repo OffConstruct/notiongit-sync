@@ -2,7 +2,7 @@
 #
 # Consumers run this from their own site repository (after actions/checkout):
 #
-#     - uses: OffConstruct/notiongit-sync@d87bb7c034bcd770ad2c39bef59542a41588b448 # v2.0.1
+#     - uses: OffConstruct/notiongit-sync@113707c94c0088b20a02853816e0ef4c784c388d # v2.1.0
 #       with:
 #         notion_token: ${{ secrets.NOTION_TOKEN }}
 #         pages_database_id: ${{ vars.PAGES_DATABASE_ID }}
