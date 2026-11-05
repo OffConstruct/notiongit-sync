@@ -12,7 +12,9 @@ workflow refuses to tag a version with no matching section here.
 
 ## [Unreleased]
 
-Planned as 2.1.0. Additive within run summary `schema_version` 1; generated
+## [2.1.0] - 2026-11-05
+
+Additive within run summary `schema_version` 1; generated
 files change once on upgrade (slugs are now quoted in front matter).
 
 ### Added
